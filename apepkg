@@ -1,0 +1,806 @@
+#!/usr/bin/env python3
+# encoding: utf-8
+"""
+apepkg
+
+A tool for building macOS packages on Linux from projects that can be easily
+managed in a version control system like git. Compatible with munki-pkg
+project directories.
+
+This tool builds packages using bomutils, xar, and cpio instead of Apple's
+pkgbuild/productbuild tools, allowing package creation on Linux systems.
+"""
+# Copyright 2025
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import absolute_import, print_function
+
+import json
+import optparse
+import os
+import plistlib
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from xml.dom import minidom
+from xml.parsers.expat import ExpatError
+
+try:
+    import yaml
+    YAML_INSTALLED = True
+except ImportError:
+    YAML_INSTALLED = False
+
+VERSION = "1.0"
+MKBOM = "mkbom"
+LSBOM = "lsbom"
+XAR = "xar"
+CPIO = "cpio"
+GZIP = "gzip"
+
+GITIGNORE_DEFAULT = """# .DS_Store files!
+.DS_Store
+
+# our build directory
+build/
+"""
+
+BUILD_INFO_FILE = "build-info"
+REQUIREMENTS_PLIST = "product-requirements.plist"
+BOM_TEXT_FILE = "Bom.txt"
+
+
+class ApePkgError(Exception):
+    '''Base Exception for errors in this domain'''
+    pass
+
+
+class BuildError(ApePkgError):
+    '''Exception for build errors'''
+    pass
+
+
+class PkgImportError(ApePkgError):
+    '''Exception for pkg import errors'''
+    pass
+
+
+def check_dependencies():
+    '''Check if required tools are available'''
+    required_tools = {
+        'mkbom': 'bomutils',
+        'lsbom': 'bomutils',
+        'xar': 'xar',
+        'cpio': 'cpio',
+        'gzip': 'gzip'
+    }
+
+    missing = []
+    for tool, package in required_tools.items():
+        if shutil.which(tool) is None:
+            if package not in missing:
+                missing.append(package)
+
+    if missing:
+        print("ERROR: Missing required packages: %s" % ', '.join(missing),
+              file=sys.stderr)
+        print("Install with: sudo apt-get install %s" % ' '.join(missing),
+              file=sys.stderr)
+        return False
+    return True
+
+
+def readPlistFromString(data):
+    '''Wrapper for the differences between Python 2 and Python 3's plistlib'''
+    try:
+        return plistlib.loads(data)
+    except AttributeError:
+        return plistlib.readPlistFromString(data)
+
+
+def readPlist(filepath):
+    '''Wrapper for the differences between Python 2 and Python 3's plistlib'''
+    try:
+        with open(filepath, "rb") as fileobj:
+            return plistlib.load(fileobj)
+    except AttributeError:
+        return plistlib.readPlist(filepath)
+
+
+def writePlist(plist, filepath):
+    '''Wrapper for the differences between Python 2 and Python 3's plistlib'''
+    try:
+        with open(filepath, "wb") as fileobj:
+            plistlib.dump(plist, fileobj)
+    except AttributeError:
+        plistlib.writePlist(plist, filepath)
+
+
+def display(message, quiet=False, toolname=None):
+    '''Print message to stdout unless quiet is True'''
+    if not quiet:
+        if not toolname:
+            toolname = os.path.basename(sys.argv[0])
+        print("%s: %s" % (toolname, message))
+
+
+def run_subprocess(cmd):
+    '''Runs cmd with Popen'''
+    proc = subprocess.Popen(
+        cmd,
+        shell=False,
+        universal_newlines=True,
+        bufsize=1,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    proc_stdout, proc_stderr = proc.communicate()
+    retcode = proc.returncode
+    return (retcode, proc_stdout, proc_stderr)
+
+
+def validate_build_info_keys(build_info, file_path):
+    '''Validates the data read from build_info.(plist|json|yaml|yml)'''
+    valid_values = {
+        'ownership': ['recommended', 'preserve', 'preserve-other'],
+        'postinstall_action': ['none', 'logout', 'restart'],
+        'distribution_style': [True, False],
+    }
+    for key in valid_values:
+        if key in build_info:
+            if build_info[key] not in valid_values[key]:
+                print("ERROR: %s key '%s' has illegal value: %s"
+                      % (file_path, key, repr(build_info[key])),
+                      file=sys.stderr)
+                print('ERROR: Legal values are: %s' % valid_values[key],
+                      file=sys.stderr)
+                return False
+    return True
+
+
+def read_build_info(path):
+    '''Reads and validates data in the build_info'''
+    build_info = None
+    exception_list = (ExpatError, ValueError)
+    if YAML_INSTALLED:
+        exception_list = (ExpatError, ValueError, yaml.scanner.ScannerError)
+    try:
+        if path.endswith('.json'):
+            with open(path, 'r') as openfile:
+                build_info = json.load(openfile)
+        elif path.endswith(('.yaml', '.yml')):
+            with open(path, 'r') as openfile:
+                build_info = yaml.load(openfile, Loader=yaml.FullLoader)
+        elif path.endswith('.plist'):
+            build_info = readPlist(path)
+    except exception_list as err:
+        raise BuildError("%s is not a valid %s file: %s"
+                         % (path, path.split('.')[-1], str(err)))
+    validate_build_info_keys(build_info, path)
+    if '${version}' in build_info['name']:
+        build_info['name'] = build_info['name'].replace(
+            '${version}',
+            str(build_info['version'])
+        )
+    return build_info
+
+
+def default_build_info(project_dir):
+    '''Return dict with default build info values'''
+    info = {}
+    info['ownership'] = "recommended"
+    info['postinstall_action'] = 'none'
+    basename = os.path.basename(project_dir.rstrip('/')).replace(" ", "")
+    info['name'] = basename + '-${version}.pkg'
+    info['identifier'] = "com.github.apepkg." + basename
+    info['install_location'] = '/'
+    info['version'] = "1.0"
+    info['distribution_style'] = True  # Always use distribution style on Linux
+    return info
+
+
+def get_build_info(project_dir, options):
+    '''Return dict with build info'''
+    info = default_build_info(project_dir)
+    info['project_dir'] = project_dir
+
+    supported_keys = [
+        'name',
+        'identifier',
+        'version',
+        'ownership',
+        'install_location',
+        'postinstall_action',
+        'distribution_style',
+    ]
+    build_file = os.path.join(project_dir, BUILD_INFO_FILE)
+    file_type = None
+    if not options.yaml and not options.json:
+        file_types = ['plist', 'json', 'yaml', 'yml']
+        for ext in file_types:
+            if os.path.exists(build_file + '.' + ext):
+                if file_type is None:
+                    file_type = ext
+                else:
+                    raise ApePkgError(
+                        "ERROR: Multiple build-info files found!")
+    else:
+        file_type = (
+            'yaml' if options.yaml else 'json' if options.json else 'plist')
+
+    file_info = None
+    if file_type and os.path.exists(build_file + '.' + file_type):
+        file_info = read_build_info(build_file + '.' + file_type)
+
+    if file_info:
+        for key in supported_keys:
+            if key in file_info:
+                info[key] = file_info[key]
+    else:
+        raise ApePkgError('ERROR: No build-info file found!')
+
+    return info
+
+
+def write_build_info(build_info, project_dir, options):
+    '''writes out our build-info file in preferred format'''
+    try:
+        if options.json:
+            build_info_json = os.path.join(
+                project_dir, "%s.json" % BUILD_INFO_FILE)
+            with open(build_info_json, 'w') as json_file:
+                json.dump(
+                    build_info, json_file, ensure_ascii=True,
+                    indent=4, separators=(',', ': '))
+        elif options.yaml:
+            build_info_yaml = os.path.join(
+                project_dir, "%s.yaml" % BUILD_INFO_FILE)
+            with open(build_info_yaml, 'w') as yaml_file:
+                yaml_file.write(
+                    yaml.dump(build_info, default_flow_style=False)
+                )
+        else:
+            build_info_plist = os.path.join(
+                project_dir, "%s.plist" % BUILD_INFO_FILE)
+            writePlist(build_info, build_info_plist)
+    except OSError as err:
+        raise ApePkgError(err)
+
+
+def create_default_gitignore(project_dir):
+    '''Create default .gitignore file for new projects'''
+    gitignore_file = os.path.join(project_dir, '.gitignore')
+    with open(gitignore_file, "w") as fileobj:
+        fileobj.write(GITIGNORE_DEFAULT)
+
+
+def create_template_project(project_dir, options):
+    '''Create an empty pkg project directory with default settings'''
+    if os.path.exists(project_dir):
+        if not options.force:
+            print("ERROR: %s already exists! "
+                  "Use --force to convert it to a project directory."
+                  % project_dir, file=sys.stderr)
+            return -1
+    payload_dir = os.path.join(project_dir, 'payload')
+    scripts_dir = os.path.join(project_dir, 'scripts')
+    build_dir = os.path.join(project_dir, 'build')
+    try:
+        if not os.path.exists(project_dir):
+            os.mkdir(project_dir)
+        os.mkdir(payload_dir)
+        os.mkdir(scripts_dir)
+        os.mkdir(build_dir)
+        build_info = default_build_info(project_dir)
+        write_build_info(build_info, project_dir, options)
+        create_default_gitignore(project_dir)
+        display("Created new package project at %s" % project_dir, options.quiet)
+    except (OSError, ApePkgError) as err:
+        print('ERROR: %s' % err, file=sys.stderr)
+        return -1
+    return 0
+
+
+def calculate_payload_size(payload_dir):
+    '''Calculate the size of the payload in KB'''
+    total_size = 0
+    for dirpath, dirnames, filenames in os.walk(payload_dir):
+        for filename in filenames:
+            filepath = os.path.join(dirpath, filename)
+            if os.path.isfile(filepath):
+                total_size += os.path.getsize(filepath)
+    return total_size // 1024  # Return size in KB
+
+
+def count_payload_files(payload_dir):
+    '''Count the number of files in the payload'''
+    count = 0
+    for dirpath, dirnames, filenames in os.walk(payload_dir):
+        count += len(filenames)
+        count += len(dirnames)
+    return count
+
+
+def create_packageinfo(build_info, flat_dir):
+    '''Create PackageInfo file'''
+    payload_size = 0
+    num_files = 0
+
+    if build_info['payload']:
+        payload_size = calculate_payload_size(build_info['payload'])
+        num_files = count_payload_files(build_info['payload'])
+
+    packageinfo_content = '''<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<pkg-info format-version="2" identifier="{identifier}" version="{version}" install-location="{location}" auth="root" postinstall-action="{postinstall}">
+    <payload installKBytes="{size}" numberOfFiles="{files}"/>
+</pkg-info>'''.format(
+        identifier=build_info['identifier'],
+        version=build_info['version'],
+        location=build_info['install_location'],
+        postinstall=build_info['postinstall_action'],
+        size=payload_size,
+        files=num_files
+    )
+
+    packageinfo_path = os.path.join(flat_dir, 'PackageInfo')
+    with open(packageinfo_path, 'w') as f:
+        f.write(packageinfo_content)
+
+    return packageinfo_path
+
+
+def create_bom(payload_dir, flat_dir, options):
+    '''Create Bill of Materials file'''
+    bom_path = os.path.join(flat_dir, 'Bom')
+
+    # mkbom requires absolute paths
+    abs_payload = os.path.abspath(payload_dir)
+    abs_bom = os.path.abspath(bom_path)
+
+    cmd = [MKBOM, '-u', '0', '-g', '80', abs_payload, abs_bom]
+    retcode, stdout, stderr = run_subprocess(cmd)
+
+    if retcode:
+        raise BuildError("mkbom failed: %s" % stderr)
+
+    display("Created Bom file", options.quiet)
+    return bom_path
+
+
+def create_payload(payload_dir, flat_dir, options):
+    '''Create compressed payload using cpio and gzip'''
+    payload_path = os.path.join(flat_dir, 'Payload')
+
+    # Change to payload directory and create cpio archive
+    original_dir = os.getcwd()
+    try:
+        os.chdir(payload_dir)
+
+        # Find all files and create cpio archive
+        find_cmd = ['find', '.', '-print']
+        cpio_cmd = [CPIO, '-o', '--format', 'odc', '--owner', '0:80']
+
+        find_proc = subprocess.Popen(find_cmd, stdout=subprocess.PIPE)
+        cpio_proc = subprocess.Popen(cpio_cmd, stdin=find_proc.stdout,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        find_proc.stdout.close()
+
+        # Compress with gzip
+        with open(payload_path, 'wb') as payload_file:
+            gzip_proc = subprocess.Popen([GZIP, '-c'], stdin=cpio_proc.stdout,
+                                        stdout=payload_file, stderr=subprocess.PIPE)
+            cpio_proc.stdout.close()
+            gzip_stderr = gzip_proc.communicate()[1]
+
+            if gzip_proc.returncode:
+                raise BuildError("gzip failed: %s" % gzip_stderr)
+
+        cpio_stderr = cpio_proc.communicate()[1]
+        if cpio_proc.returncode:
+            raise BuildError("cpio failed: %s" % cpio_stderr.decode())
+
+        display("Created compressed Payload", options.quiet)
+
+    finally:
+        os.chdir(original_dir)
+
+    return payload_path
+
+
+def create_scripts(scripts_dir, flat_dir, options):
+    '''Create compressed Scripts archive'''
+    scripts_path = os.path.join(flat_dir, 'Scripts')
+
+    original_dir = os.getcwd()
+    try:
+        os.chdir(scripts_dir)
+
+        # Make scripts executable
+        for script_name in ['preinstall', 'postinstall']:
+            script_path = os.path.join(scripts_dir, script_name)
+            if os.path.exists(script_path):
+                os.chmod(script_path, 0o755)
+                display("Made %s executable" % script_name, options.quiet)
+
+        # Create cpio archive of scripts
+        find_cmd = ['find', '.', '-print']
+        cpio_cmd = [CPIO, '-o', '--format', 'odc', '--owner', '0:80']
+
+        find_proc = subprocess.Popen(find_cmd, stdout=subprocess.PIPE)
+        cpio_proc = subprocess.Popen(cpio_cmd, stdin=find_proc.stdout,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        find_proc.stdout.close()
+
+        # Compress with gzip
+        with open(scripts_path, 'wb') as scripts_file:
+            gzip_proc = subprocess.Popen([GZIP, '-c'], stdin=cpio_proc.stdout,
+                                        stdout=scripts_file, stderr=subprocess.PIPE)
+            cpio_proc.stdout.close()
+            gzip_stderr = gzip_proc.communicate()[1]
+
+            if gzip_proc.returncode:
+                raise BuildError("gzip failed: %s" % gzip_stderr)
+
+        cpio_stderr = cpio_proc.communicate()[1]
+        if cpio_proc.returncode:
+            raise BuildError("cpio failed: %s" % cpio_stderr.decode())
+
+        display("Created compressed Scripts", options.quiet)
+
+    finally:
+        os.chdir(original_dir)
+
+    return scripts_path
+
+
+def create_distribution(build_info, pkg_name, dist_dir):
+    '''Create Distribution file for distribution-style package'''
+
+    distribution_content = '''<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<installer-gui-script minSpecVersion="1">
+    <title>{name}</title>
+    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+    <pkg-ref id="{identifier}"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="{identifier}"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="{identifier}" visible="false">
+        <pkg-ref id="{identifier}"/>
+    </choice>
+    <pkg-ref id="{identifier}" version="{version}" onConclusion="none">{pkg_name}</pkg-ref>
+</installer-gui-script>'''.format(
+        name=build_info['name'].replace('.pkg', ''),
+        identifier=build_info['identifier'],
+        version=build_info['version'],
+        pkg_name=pkg_name
+    )
+
+    distribution_path = os.path.join(dist_dir, 'Distribution')
+    with open(distribution_path, 'w') as f:
+        f.write(distribution_content)
+
+    return distribution_path
+
+
+def build_component_pkg(build_info, options):
+    '''Build component package using bomutils'''
+
+    flat_name = build_info['identifier'] + '.pkg'
+    flat_dir = os.path.join(build_info['tmpdir'], flat_name)
+    os.makedirs(flat_dir)
+
+    # Create PackageInfo
+    create_packageinfo(build_info, flat_dir)
+
+    # Create Bom if payload exists
+    if build_info['payload']:
+        create_bom(build_info['payload'], flat_dir, options)
+        create_payload(build_info['payload'], flat_dir, options)
+
+    # Create Scripts if they exist
+    if build_info['scripts']:
+        create_scripts(build_info['scripts'], flat_dir, options)
+
+    return flat_dir
+
+
+def build_distribution_pkg(build_info, flat_pkg_dir, options):
+    '''Build distribution-style package using xar'''
+
+    output_pkg = os.path.join(build_info['build_dir'], build_info['name'])
+
+    # Create Distribution file
+    pkg_name = os.path.basename(flat_pkg_dir)
+    create_distribution(build_info, pkg_name, build_info['tmpdir'])
+
+    # Create xar archive
+    original_dir = os.getcwd()
+    try:
+        os.chdir(build_info['tmpdir'])
+
+        cmd = [XAR, '--compression', 'none', '-cf', output_pkg,
+               'Distribution', pkg_name]
+        retcode, stdout, stderr = run_subprocess(cmd)
+
+        if retcode:
+            raise BuildError("xar failed: %s" % stderr)
+
+        display("Created package: %s" % output_pkg, options.quiet)
+
+    finally:
+        os.chdir(original_dir)
+
+    return output_pkg
+
+
+def export_bom_info(build_info, options):
+    '''Extract and export bom info to Bom.txt'''
+    flat_name = build_info['identifier'] + '.pkg'
+    flat_dir = os.path.join(build_info['tmpdir'], flat_name)
+    bom_file = os.path.join(flat_dir, 'Bom')
+
+    if not os.path.exists(bom_file):
+        display("No Bom file found to export", options.quiet)
+        return
+
+    destination = os.path.join(build_info['project_dir'], BOM_TEXT_FILE)
+
+    cmd = [LSBOM, bom_file]
+    retcode, stdout, stderr = run_subprocess(cmd)
+
+    if retcode:
+        raise BuildError("lsbom failed: %s" % stderr)
+
+    with open(destination, 'w') as f:
+        f.write(stdout)
+
+    display("Exported bom info to %s" % destination, options.quiet)
+
+
+def sync_from_bom_info(project_dir, options):
+    '''Uses Bom.txt to apply modes to files in payload dir'''
+
+    bom_list_file = os.path.join(project_dir, BOM_TEXT_FILE)
+    payload_dir = os.path.join(project_dir, 'payload')
+
+    if not os.path.exists(bom_list_file):
+        print("ERROR: Can't sync with bom info: no %s found in project directory."
+              % BOM_TEXT_FILE, file=sys.stderr)
+        return -1
+
+    returncode = 0
+    changes_made = 0
+
+    try:
+        with open(bom_list_file) as fileref:
+            for line in fileref:
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = line.split('\t')
+                if len(parts) < 3:
+                    continue
+
+                path = parts[0]
+                if path.startswith('./'):
+                    path = path[2:]
+
+                full_mode = parts[1]
+                user_group = parts[2].partition('/')
+                desired_user = int(user_group[0])
+                desired_group = int(user_group[2])
+                desired_mode = int(full_mode[-4:], 8)
+
+                payload_path = os.path.join(payload_dir, path)
+
+                if os.path.lexists(payload_path):
+                    current_mode = stat.S_IMODE(os.lstat(payload_path).st_mode)
+                    if current_mode != desired_mode:
+                        display("Changing mode of %s to %s"
+                                % (payload_path, oct(desired_mode)),
+                                options.quiet)
+                        os.chmod(payload_path, desired_mode)
+                        changes_made += 1
+                elif full_mode.startswith('4'):
+                    # Directory doesn't exist; create it
+                    display("Creating %s with mode %s"
+                            % (payload_path, oct(desired_mode)),
+                            options.quiet)
+                    os.mkdir(payload_path, desired_mode)
+                    changes_made += 1
+                else:
+                    print("ERROR: File %s is missing in payload"
+                          % payload_path, file=sys.stderr)
+                    returncode = -1
+                    break
+
+    except (OSError, ValueError) as err:
+        print('ERROR: %s' % err, file=sys.stderr)
+        return -1
+
+    if returncode == 0 and not options.quiet:
+        if changes_made:
+            display("Sync successful.")
+        else:
+            display("Sync successful: no changes needed.")
+
+    return returncode
+
+
+def add_project_subdirs(build_info):
+    '''Adds and validates project subdirs to build_info'''
+    project_dir = build_info['project_dir']
+    payload_dir = os.path.join(project_dir, 'payload')
+    scripts_dir = os.path.join(project_dir, 'scripts')
+
+    if not os.path.isdir(payload_dir):
+        payload_dir = None
+    if not os.path.isdir(scripts_dir):
+        scripts_dir = None
+    elif os.listdir(scripts_dir) in [[], ['.DS_Store']]:
+        scripts_dir = None
+
+    if not payload_dir and not scripts_dir:
+        raise BuildError(
+            "%s does not contain a payload folder or a scripts folder."
+            % project_dir)
+
+    build_dir = os.path.join(project_dir, 'build')
+    if not os.path.exists(build_dir):
+        os.mkdir(build_dir)
+    elif not os.path.isdir(build_dir):
+        raise BuildError("%s is not a directory." % build_dir)
+
+    build_info['payload'] = payload_dir
+    build_info['scripts'] = scripts_dir
+    build_info['build_dir'] = build_dir
+    build_info['tmpdir'] = tempfile.mkdtemp()
+
+
+def build(project_dir, options):
+    '''Build our package'''
+
+    build_info = {}
+    try:
+        try:
+            build_info = get_build_info(project_dir, options)
+        except ApePkgError as err:
+            print(str(err), file=sys.stderr)
+            return -1
+
+        add_project_subdirs(build_info)
+
+        # Remove pre-existing pkg
+        outputname = os.path.join(build_info['build_dir'], build_info['name'])
+        if os.path.exists(outputname):
+            os.remove(outputname)
+
+        # Build component package
+        display("Building component package...", options.quiet)
+        flat_pkg_dir = build_component_pkg(build_info, options)
+
+        # Export bom info if requested
+        if options.export_bom_info:
+            export_bom_info(build_info, options)
+
+        # Build distribution package
+        if build_info.get('distribution_style', True):
+            display("Building distribution package...", options.quiet)
+            build_distribution_pkg(build_info, flat_pkg_dir, options)
+
+        # Cleanup temp dir
+        shutil.rmtree(build_info['tmpdir'])
+
+        display("Package built successfully!", options.quiet)
+        return 0
+
+    except BuildError as err:
+        print('ERROR: %s' % err, file=sys.stderr)
+        if build_info.get('tmpdir') and os.path.exists(build_info['tmpdir']):
+            shutil.rmtree(build_info['tmpdir'])
+        return -1
+
+
+def valid_project_dir(project_dir):
+    '''validate project dir. Returns a boolean'''
+    if not os.path.exists(project_dir):
+        print("ERROR: %s: Project not found." % project_dir, file=sys.stderr)
+        return False
+    elif not os.path.isdir(project_dir):
+        print("ERROR: %s is not a directory." % project_dir, file=sys.stderr)
+        return False
+    return True
+
+
+def main():
+    '''Main'''
+    usage = """usage: %prog [options] pkg_project_directory
+
+       APE: Apple Package Engineer
+
+       A tool for building macOS packages on Linux from the contents of a
+       pkg_project_directory. Compatible with munki-pkg projects."""
+    parser = optparse.OptionParser(usage=usage, version=VERSION)
+    parser.add_option('--create', action='store_true',
+                      help='Creates a new empty project with default settings '
+                           'at given path.')
+    parser.add_option('--json', action='store_true',
+                      help='Create build-info file in JSON format. '
+                           'Useful only with --create option.')
+    parser.add_option('--yaml', action='store_true',
+                      help='Create build-info file in YAML format. '
+                           'Useful only with --create option.')
+    parser.add_option('--export-bom-info', action='store_true',
+                      help='Exports the Bill-Of-Materials file as Bom.txt under '
+                           'the pkg_project_folder.')
+    parser.add_option('--sync', action='store_true',
+                      help='Use Bom.txt to set modes of files in payload '
+                           'directory and create missing empty directories.')
+    parser.add_option('--quiet', action='store_true',
+                      help='Inhibits status messages on stdout.')
+    parser.add_option('-f', '--force', action='store_true',
+                      help='Forces creation of project directory if it already '
+                           'exists.')
+
+    options, arguments = parser.parse_args()
+
+    if not arguments:
+        parser.print_usage()
+        sys.exit(0)
+
+    if len(arguments) > 1:
+        print("ERROR: Only a single package project can be built at a time!",
+              file=sys.stderr)
+        sys.exit(-1)
+
+    if options.json and options.yaml:
+        print("ERROR: Only a single build-info format can be specified!",
+              file=sys.stderr)
+        sys.exit(-1)
+
+    if options.yaml and not YAML_INSTALLED:
+        print("ERROR: PyYAML missing. Install with: pip install PyYAML",
+              file=sys.stderr)
+        sys.exit(-1)
+
+    # Check for required dependencies
+    if not options.create and not options.sync:
+        if not check_dependencies():
+            sys.exit(-1)
+
+    if options.create:
+        result = create_template_project(arguments[0], options)
+        sys.exit(result)
+
+    # Options past here require a valid project_dir
+    if not valid_project_dir(arguments[0]):
+        sys.exit(-1)
+
+    if options.sync:
+        result = sync_from_bom_info(arguments[0], options)
+    else:
+        result = build(arguments[0], options)
+
+    sys.exit(result)
+
+
+if __name__ == '__main__':
+    main()

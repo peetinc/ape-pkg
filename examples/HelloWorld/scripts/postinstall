@@ -1,0 +1,7 @@
+#!/bin/bash
+# Postinstall script for HelloWorld package
+
+echo "HelloWorld package installed successfully!"
+echo "You can now run: hello"
+
+exit 0

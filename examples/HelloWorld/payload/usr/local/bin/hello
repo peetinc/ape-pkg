@@ -1,0 +1,6 @@
+#!/bin/bash
+# Simple hello world script
+
+echo "Hello, World!"
+echo "This script was installed by a package built with apepkg"
+echo "Package: com.example.helloworld"
