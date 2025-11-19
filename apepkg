@@ -29,6 +29,7 @@ from __future__ import absolute_import, print_function
 import json
 import optparse
 import os
+import platform
 import plistlib
 import shutil
 import stat
@@ -371,7 +372,15 @@ def create_bom(payload_dir, flat_dir, options):
     abs_payload = os.path.abspath(payload_dir)
     abs_bom = os.path.abspath(bom_path)
 
-    cmd = [MKBOM, '-u', '0', '-g', '80', abs_payload, abs_bom]
+    # Detect platform and use appropriate mkbom syntax
+    # macOS uses Apple's mkbom, Linux uses bomutils mkbom
+    if platform.system() == 'Darwin':
+        # Apple's mkbom syntax: mkbom <directory> <bom>
+        cmd = [MKBOM, abs_payload, abs_bom]
+    else:
+        # bomutils mkbom syntax: mkbom -u <uid> -g <gid> <directory> <bom>
+        cmd = [MKBOM, '-u', '0', '-g', '80', abs_payload, abs_bom]
+
     retcode, stdout, stderr = run_subprocess(cmd)
 
     if retcode:
