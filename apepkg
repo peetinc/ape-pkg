@@ -336,26 +336,110 @@ def count_payload_files(payload_dir):
     return count
 
 
+def find_bundles(payload_dir):
+    '''Find .app bundles in payload and extract their Info.plist data'''
+    bundles = []
+
+    if not payload_dir or not os.path.exists(payload_dir):
+        return bundles
+
+    for root, dirs, files in os.walk(payload_dir):
+        for dirname in dirs:
+            if dirname.endswith('.app'):
+                bundle_path = os.path.join(root, dirname)
+                info_plist_path = os.path.join(bundle_path, 'Contents', 'Info.plist')
+
+                if os.path.exists(info_plist_path):
+                    try:
+                        with open(info_plist_path, 'rb') as f:
+                            info_plist = plistlib.load(f)
+
+                        # Get relative path from payload
+                        rel_path = './' + os.path.relpath(bundle_path, payload_dir)
+
+                        bundle_info = {
+                            'path': rel_path,
+                            'id': info_plist.get('CFBundleIdentifier', dirname.replace('.app', '')),
+                            'version': info_plist.get('CFBundleShortVersionString', '1.0'),
+                            'bundle_version': info_plist.get('CFBundleVersion', '1.0')
+                        }
+                        bundles.append(bundle_info)
+                    except Exception:
+                        # If we can't read the plist, skip this bundle
+                        pass
+
+    return bundles
+
+
 def create_packageinfo(build_info, flat_dir):
     '''Create PackageInfo file'''
     payload_size = 0
     num_files = 0
+    bundles = []
 
     if build_info['payload']:
         payload_size = calculate_payload_size(build_info['payload'])
         num_files = count_payload_files(build_info['payload'])
+        bundles = find_bundles(build_info['payload'])
 
-    packageinfo_content = '''<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<pkg-info format-version="2" identifier="{identifier}" version="{version}" install-location="{location}" auth="root" postinstall-action="{postinstall}">
-    <payload installKBytes="{size}" numberOfFiles="{files}"/>
-</pkg-info>'''.format(
-        identifier=build_info['identifier'],
-        version=build_info['version'],
-        location=build_info['install_location'],
-        postinstall=build_info['postinstall_action'],
-        size=payload_size,
-        files=num_files
-    )
+    # Start building PackageInfo XML
+    packageinfo_lines = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<pkg-info postinstall-action="{postinstall}" preserve-xattr="false" format-version="2" identifier="{identifier}" version="{version}" generator-version="apepkg-{apever}" install-location="{location}" auth="root">'.format(
+            identifier=build_info['identifier'],
+            version=build_info['version'],
+            location=build_info['install_location'],
+            postinstall=build_info['postinstall_action'],
+            apever=VERSION
+        ),
+        '    <payload numberOfFiles="{files}" installKBytes="{size}"/>'.format(
+            files=num_files,
+            size=payload_size
+        )
+    ]
+
+    # Add bundle information if any bundles were found
+    for bundle in bundles:
+        packageinfo_lines.append('    <bundle path="{path}" id="{id}" CFBundleShortVersionString="{version}" CFBundleVersion="{bundle_version}"/>'.format(**bundle))
+
+    # Add bundle version/upgrade/update sections if bundles exist
+    if bundles:
+        packageinfo_lines.append('    <bundle-version>')
+        for bundle in bundles:
+            packageinfo_lines.append('        <bundle id="{id}"/>'.format(**bundle))
+        packageinfo_lines.append('    </bundle-version>')
+
+        packageinfo_lines.append('    <upgrade-bundle>')
+        for bundle in bundles:
+            packageinfo_lines.append('        <bundle id="{id}"/>'.format(**bundle))
+        packageinfo_lines.append('    </upgrade-bundle>')
+
+        packageinfo_lines.append('    <update-bundle/>')
+        packageinfo_lines.append('    <atomic-update-bundle/>')
+
+        packageinfo_lines.append('    <strict-identifier>')
+        for bundle in bundles:
+            packageinfo_lines.append('        <bundle id="{id}"/>'.format(**bundle))
+        packageinfo_lines.append('    </strict-identifier>')
+
+        packageinfo_lines.append('    <relocate/>')
+
+    # Add scripts section if scripts exist
+    if build_info['scripts']:
+        packageinfo_lines.append('    <scripts>')
+        preinstall_path = os.path.join(build_info['scripts'], 'preinstall')
+        postinstall_path = os.path.join(build_info['scripts'], 'postinstall')
+
+        if os.path.exists(preinstall_path):
+            packageinfo_lines.append('        <preinstall file="./preinstall" timeout="600"/>')
+        if os.path.exists(postinstall_path):
+            packageinfo_lines.append('        <postinstall file="./postinstall" timeout="600"/>')
+
+        packageinfo_lines.append('    </scripts>')
+
+    packageinfo_lines.append('</pkg-info>')
+
+    packageinfo_content = '\n'.join(packageinfo_lines)
 
     packageinfo_path = os.path.join(flat_dir, 'PackageInfo')
     with open(packageinfo_path, 'w') as f:
@@ -364,7 +448,70 @@ def create_packageinfo(build_info, flat_dir):
     return packageinfo_path
 
 
-def create_bom(payload_dir, flat_dir, options):
+def generate_bom_filelist(payload_dir, ownership='recommended'):
+    '''Generate a file list in lsbom format for mkbom -i'''
+    entries = []
+
+    # Determine UID/GID based on ownership setting
+    if ownership == 'recommended':
+        uid, gid = 0, 0  # root/wheel
+    else:
+        uid, gid = None, None  # Will use actual ownership
+
+    # Walk the payload directory - sort for consistent ordering
+    for root, dirs, files in os.walk(payload_dir):
+        dirs.sort()  # Sort directories for consistent traversal
+        files.sort()  # Sort files for consistent ordering
+
+        # Get relative path from payload_dir
+        rel_root = os.path.relpath(root, payload_dir)
+
+        # Add the directory itself
+        stat_info = os.lstat(root)
+        mode = stat_info.st_mode
+        u = uid if uid is not None else stat_info.st_uid
+        g = gid if gid is not None else stat_info.st_gid
+
+        if rel_root == '.':
+            path = '.'
+        else:
+            path = './' + rel_root
+
+        entries.append((path, f"{path}\t{oct(mode)[2:]}\t{u}/{g}"))
+
+        # Add files in this directory
+        for filename in sorted(files):  # Sort files
+            if filename == '.DS_Store':
+                continue
+
+            file_path = os.path.join(root, filename)
+            try:
+                stat_info = os.lstat(file_path)
+                mode = stat_info.st_mode
+                size = stat_info.st_size
+
+                u = uid if uid is not None else stat_info.st_uid
+                g = gid if gid is not None else stat_info.st_gid
+
+                if rel_root == '.':
+                    path = './' + filename
+                else:
+                    path = './' + os.path.join(rel_root, filename)
+
+                entry = f"{path}\t{oct(mode)[2:]}\t{u}/{g}\t{size}\t0"
+                entries.append((path, entry))
+            except (OSError, IOError):
+                # Skip files we can't stat
+                pass
+
+    # Sort entries by path for consistent output
+    entries.sort(key=lambda x: x[0])
+
+    # Return just the entry strings, joined by newlines
+    return '\n'.join([entry[1] for entry in entries])
+
+
+def create_bom(payload_dir, flat_dir, build_info, options):
     '''Create Bill of Materials file'''
     bom_path = os.path.join(flat_dir, 'Bom')
 
@@ -372,16 +519,33 @@ def create_bom(payload_dir, flat_dir, options):
     abs_payload = os.path.abspath(payload_dir)
     abs_bom = os.path.abspath(bom_path)
 
+    ownership = build_info.get('ownership', 'recommended')
+
     # Detect platform and use appropriate mkbom syntax
     # macOS uses Apple's mkbom, Linux uses bomutils mkbom
     if platform.system() == 'Darwin':
-        # Apple's mkbom syntax: mkbom <directory> <bom>
-        cmd = [MKBOM, abs_payload, abs_bom]
+        # On macOS, use mkbom -i with a filelist to control ownership
+        filelist_path = os.path.join(flat_dir, 'filelist.txt')
+        filelist_content = generate_bom_filelist(abs_payload, ownership)
+
+        with open(filelist_path, 'w') as f:
+            f.write(filelist_content)
+
+        cmd = [MKBOM, '-i', filelist_path, abs_bom]
+        retcode, stdout, stderr = run_subprocess(cmd)
+
+        # Keep filelist for debugging (will be cleaned up with tmpdir)
+        # if os.path.exists(filelist_path):
+        #     os.remove(filelist_path)
     else:
         # bomutils mkbom syntax: mkbom -u <uid> -g <gid> <directory> <bom>
-        cmd = [MKBOM, '-u', '0', '-g', '80', abs_payload, abs_bom]
+        if ownership == 'recommended':
+            cmd = [MKBOM, '-u', '0', '-g', '80', abs_payload, abs_bom]
+        else:
+            # For preserve, don't specify ownership flags (use actual ownership)
+            cmd = [MKBOM, abs_payload, abs_bom]
 
-    retcode, stdout, stderr = run_subprocess(cmd)
+        retcode, stdout, stderr = run_subprocess(cmd)
 
     if retcode:
         raise BuildError("mkbom failed: %s" % stderr)
@@ -399,8 +563,8 @@ def create_payload(payload_dir, flat_dir, options):
     try:
         os.chdir(payload_dir)
 
-        # Find all files and create cpio archive
-        find_cmd = ['find', '.', '-print']
+        # Find all files and create cpio archive (excluding .DS_Store)
+        find_cmd = ['find', '.', '-not', '-name', '.DS_Store', '-print']
         cpio_cmd = [CPIO, '-o', '--format', 'odc', '--owner', '0:80']
 
         find_proc = subprocess.Popen(find_cmd, stdout=subprocess.PIPE)
@@ -520,7 +684,7 @@ def build_component_pkg(build_info, options):
 
     # Create Bom if payload exists
     if build_info['payload']:
-        create_bom(build_info['payload'], flat_dir, options)
+        create_bom(build_info['payload'], flat_dir, build_info, options)
         create_payload(build_info['payload'], flat_dir, options)
 
     # Create Scripts if they exist
