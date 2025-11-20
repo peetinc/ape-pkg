@@ -1,6 +1,6 @@
 # apepkg - Apple Package Engineer
 
-![APE Logo](resources/ape-pkg.png)
+<img src="resources/ape-pkg.png" alt="APE Logo" width="300">
 
 **Build macOS packages on Linux**
 
