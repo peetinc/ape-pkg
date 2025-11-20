@@ -925,7 +925,8 @@ def build_distribution_pkg(build_info, flat_pkg_dir, options):
 
 def export_bom_info(build_info, options):
     '''Extract and export bom info to Bom.txt'''
-    flat_name = build_info['identifier'] + '.pkg'
+    # Use same naming as build_component_pkg
+    flat_name = build_info['name'].replace('.pkg', '') + '.pkg'
     flat_dir = os.path.join(build_info['tmpdir'], flat_name)
     bom_file = os.path.join(flat_dir, 'Bom')
 
@@ -1020,7 +1021,8 @@ def sync_from_bom_info(project_dir, options):
 
 def add_project_subdirs(build_info):
     '''Adds and validates project subdirs to build_info'''
-    project_dir = build_info['project_dir']
+    project_dir = os.path.abspath(build_info['project_dir'])
+    build_info['project_dir'] = project_dir  # Update with absolute path
     payload_dir = os.path.join(project_dir, 'payload')
     scripts_dir = os.path.join(project_dir, 'scripts')
 
