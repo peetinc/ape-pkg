@@ -154,6 +154,8 @@ The build-info file can be in plist (default), JSON, or YAML format.
     <string>recommended</string>
     <key>postinstall_action</key>
     <string>none</string>
+    <key>suppress_bundle_relocation</key>
+    <true/>
     <key>version</key>
     <string>1.0</string>
 </dict>
@@ -169,6 +171,7 @@ The build-info file can be in plist (default), JSON, or YAML format.
     "name": "MyPackage-${version}.pkg",
     "ownership": "recommended",
     "postinstall_action": "none",
+    "suppress_bundle_relocation": true,
     "version": "1.0"
 }
 ```
@@ -181,6 +184,7 @@ install_location: /
 name: MyPackage-${version}.pkg
 ownership: recommended
 postinstall_action: none
+suppress_bundle_relocation: true
 version: '1.0'
 ```
 
@@ -203,6 +207,9 @@ String. One of "recommended", "preserve", or "preserve-other". Default: "recomme
 
 **postinstall_action**
 String. One of "none", "logout", or "restart". Default: "none"
+
+**suppress_bundle_relocation**
+Boolean. When true, prevents bundle relocation during installation. Default: true
 
 **distribution_style**
 Boolean. Whether to build a distribution-style package. Default: true

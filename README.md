@@ -102,9 +102,8 @@ cargo install apple-codesign
   --p12-file ~/certs/developer-id-installer.p12 \
   --p12-password-env CERT_PASSWORD \
   --notarize \
-  --apple-id your.email@example.com \
-  --team-id TEAM123456 \
-  --app-password-env NOTARY_PASSWORD
+  --api-issuer YOUR_TEAM_ID \
+  --api-key YOUR_API_KEY_ID
 ```
 
 **Prerequisites for signing:**
@@ -112,9 +111,21 @@ cargo install apple-codesign
 - Export from macOS Keychain or obtain from Apple Developer portal
 
 **Prerequisites for notarization:**
-- Apple ID with app-specific password
-- Developer Team ID
-- Valid Developer ID certificate
+- App Store Connect API Key (not Apple ID password)
+- API Issuer ID (your Team ID, a UUID like `12345678-abcd-1234-abcd-123456789012`)
+- API Key ID (from App Store Connect, like `ABC123XYZ`)
+- `.p8` file (AuthKey_<ID>.p8) in a standard location:
+  - `~/.appstoreconnect/private_keys/`
+  - `~/.private_keys/`
+  - `~/private_keys/`
+  - `./private_keys/`
+
+**To get an App Store Connect API Key:**
+1. Go to https://appstoreconnect.apple.com/access/api
+2. Create a new API Key (select "App Manager" role or higher)
+3. Note the Issuer ID and Key ID
+4. Download the `.p8` file (e.g., `AuthKey_ABC123XYZ.p8`)
+5. Place it in `~/.appstoreconnect/private_keys/`
 
 ### Obtaining Certificates
 
@@ -203,19 +214,25 @@ jobs:
         run: |
           echo "$CERTIFICATE_BASE64" | base64 --decode > cert.p12
 
+      - name: Setup App Store Connect API Key
+        env:
+          API_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8_BASE64 }}
+          API_KEY_ID: ${{ secrets.API_KEY_ID }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$API_KEY_P8_BASE64" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
+
       - name: Build, sign, and notarize package
         env:
           CERT_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          NOTARY_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
         run: |
           ./apepkg MyPackage \
             --sign \
             --p12-file cert.p12 \
             --p12-password-env CERT_PASSWORD \
             --notarize \
-            --apple-id ${{ secrets.APPLE_ID }} \
-            --team-id ${{ secrets.TEAM_ID }} \
-            --app-password-env NOTARY_PASSWORD
+            --api-issuer ${{ secrets.API_ISSUER }} \
+            --api-key ${{ secrets.API_KEY_ID }}
 
       - name: Upload signed package
         uses: actions/upload-artifact@v2
@@ -227,9 +244,9 @@ jobs:
 **Required GitHub Secrets:**
 - `DEVELOPER_ID_INSTALLER_P12_BASE64` - Your .p12 certificate (base64 encoded)
 - `P12_PASSWORD` - Certificate password
-- `APPLE_ID` - Your Apple ID email
-- `TEAM_ID` - Your Developer Team ID
-- `NOTARY_APP_PASSWORD` - App-specific password for notarization
+- `API_ISSUER` - App Store Connect API Issuer ID (Team ID UUID)
+- `API_KEY_ID` - App Store Connect API Key ID
+- `APP_STORE_CONNECT_API_KEY_P8_BASE64` - Your .p8 API key file (base64 encoded)
 
 ## Requirements
 
@@ -269,10 +286,9 @@ Signing & Notarization:
   --p12-password <pass>     Certificate password (use --p12-password-env instead)
   --p12-password-env <var>  Environment variable with certificate password
   --notarize                Submit for notarization (requires --sign)
-  --apple-id <email>        Apple ID for notarization
-  --team-id <id>            Developer Team ID
-  --app-password-env <var>  Environment variable with app-specific password
-  --notarize-wait           Wait for notarization to complete (default)
+  --api-issuer <uuid>       App Store Connect API Issuer ID (Team ID UUID)
+  --api-key <id>            App Store Connect API Key ID (requires .p8 file)
+  --notarize-wait           Wait for notarization to complete and staple (default)
   --notarize-no-wait        Don't wait for notarization completion
 ```
 

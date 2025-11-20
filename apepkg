@@ -159,20 +159,19 @@ def notarize_package(pkg_path, options):
 
     display("Submitting package for notarization...", options.quiet)
 
-    # Get app password from environment
-    app_password = os.environ.get(options.app_password_env)
-    if not app_password:
-        raise BuildError(
-            f"Environment variable {options.app_password_env} not set")
-
-    # Submit for notarization
+    # Build notarization command
+    # rcodesign notary-submit requires:
+    # - --api-issuer: Team ID (UUID)
+    # - --api-key: API Key ID
+    # - AuthKey_<ID>.p8 file in standard locations
     cmd = ['rcodesign', 'notary-submit',
-           '--api-issuer', options.team_id,
-           '--api-key', options.apple_id,
-           '--api-key-password', app_password]
+           '--api-issuer', options.api_issuer,
+           '--api-key', options.api_key]
 
+    # Use --staple to automatically staple after successful notarization
+    # This implies --wait
     if options.notarize_wait:
-        cmd.append('--wait')
+        cmd.append('--staple')
 
     cmd.append(pkg_path)
 
@@ -183,16 +182,7 @@ def notarize_package(pkg_path, options):
     display("Notarization submitted successfully", options.quiet)
 
     if options.notarize_wait:
-        display("Notarization completed successfully", options.quiet)
-
-        # Staple the notarization ticket
-        display("Stapling notarization ticket...", options.quiet)
-        cmd = ['rcodesign', 'staple', pkg_path]
-        retcode, stdout, stderr = run_subprocess(cmd)
-        if retcode:
-            raise BuildError(f"Stapling failed: {stderr}")
-
-        display("Notarization ticket stapled successfully", options.quiet)
+        display("Notarization completed and stapled successfully", options.quiet)
     else:
         display("Notarization submitted (not waiting for completion)", options.quiet)
 
@@ -300,6 +290,7 @@ def default_build_info(project_dir):
     info = {}
     info['ownership'] = "recommended"
     info['postinstall_action'] = 'none'
+    info['suppress_bundle_relocation'] = True  # Prevent bundle relocation
     basename = os.path.basename(project_dir.rstrip('/')).replace(" ", "")
     info['name'] = basename + '-${version}.pkg'
     info['identifier'] = "com.github.apepkg." + basename
@@ -322,6 +313,7 @@ def get_build_info(project_dir, options):
         'install_location',
         'postinstall_action',
         'distribution_style',
+        'suppress_bundle_relocation',
     ]
     build_file = os.path.join(project_dir, BUILD_INFO_FILE)
     file_type = None
@@ -517,7 +509,9 @@ def create_packageinfo(build_info, flat_dir):
             packageinfo_lines.append('        <bundle id="{id}"/>'.format(**bundle))
         packageinfo_lines.append('    </strict-identifier>')
 
-        packageinfo_lines.append('    <relocate/>')
+        # Only add relocate element if suppress_bundle_relocation is False
+        if not build_info.get('suppress_bundle_relocation', True):
+            packageinfo_lines.append('    <relocate/>')
 
     # Add scripts section if scripts exist
     if build_info['scripts']:
@@ -549,7 +543,7 @@ def generate_bom_filelist(payload_dir, ownership='recommended'):
 
     # Determine UID/GID based on ownership setting
     if ownership == 'recommended':
-        uid, gid = 0, 0  # root/wheel
+        uid, gid = 0, 80  # root/admin (macOS standard for installed packages)
     else:
         uid, gid = None, None  # Will use actual ownership
 
@@ -619,19 +613,55 @@ def create_bom(payload_dir, flat_dir, build_info, options):
     # Detect platform and use appropriate mkbom syntax
     # macOS uses Apple's mkbom, Linux uses bomutils mkbom
     if platform.system() == 'Darwin':
-        # On macOS, use mkbom -i with a filelist to control ownership
-        filelist_path = os.path.join(flat_dir, 'filelist.txt')
-        filelist_content = generate_bom_filelist(abs_payload, ownership)
-
-        with open(filelist_path, 'w') as f:
-            f.write(filelist_content)
-
-        cmd = [MKBOM, '-i', filelist_path, abs_bom]
+        # On macOS, use direct mkbom (like munki-pkg's pkgbuild does)
+        # Apple's mkbom -i has bugs with certain directory structures (_CodeSignature)
+        # We'll create the BOM with actual ownership, then modify it
+        cmd = [MKBOM, abs_payload, abs_bom]
         retcode, stdout, stderr = run_subprocess(cmd)
 
-        # Keep filelist for debugging (will be cleaned up with tmpdir)
-        # if os.path.exists(filelist_path):
-        #     os.remove(filelist_path)
+        if retcode:
+            raise BuildError("mkbom failed: %s" % stderr)
+
+        # If ownership is 'recommended', modify the BOM to use root:admin (0:80)
+        # We do this by: lsbom -> modify ownership -> mkbom -i
+        if ownership == 'recommended':
+            # Export current BOM to text (default lsbom format)
+            temp_bom_txt = os.path.join(flat_dir, 'bom_temp.txt')
+            cmd = [LSBOM, abs_bom]
+            retcode, stdout, stderr = run_subprocess(cmd)
+
+            if retcode:
+                raise BuildError("lsbom failed: %s" % stderr)
+
+            # Modify ownership in the output (change all ownership to 0/80)
+            # Default lsbom format: path<TAB>mode<TAB>uid/gid[<TAB>size<TAB>checksum]
+            modified_lines = []
+            for line in stdout.strip().split('\n'):
+                if not line:
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 2:
+                    # Replace UID/GID field (varies by position based on file type)
+                    # For directories: path mode uid/gid
+                    # For files: path mode uid/gid size checksum
+                    if len(parts) >= 3:
+                        # Has uid/gid field - replace it
+                        parts[2] = '0/80'
+                    modified_lines.append('\t'.join(parts))
+
+            # Write modified BOM text (with trailing newline)
+            with open(temp_bom_txt, 'w') as f:
+                f.write('\n'.join(modified_lines) + '\n')
+
+            # Recreate BOM from modified text
+            os.remove(abs_bom)
+            cmd = [MKBOM, '-i', temp_bom_txt, abs_bom]
+            retcode, stdout, stderr = run_subprocess(cmd)
+
+            if retcode:
+                raise BuildError("mkbom -i (ownership fix) failed: %s" % stderr)
+
+            os.remove(temp_bom_txt)
     else:
         # bomutils mkbom syntax: mkbom -u <uid> -g <gid> <directory> <bom>
         if ownership == 'recommended':
@@ -642,8 +672,8 @@ def create_bom(payload_dir, flat_dir, build_info, options):
 
         retcode, stdout, stderr = run_subprocess(cmd)
 
-    if retcode:
-        raise BuildError("mkbom failed: %s" % stderr)
+        if retcode:
+            raise BuildError("mkbom failed: %s" % stderr)
 
     display("Created Bom file", options.quiet)
     return bom_path
@@ -1086,16 +1116,15 @@ def main():
                            'More secure than --p12-password.')
     parser.add_option('--notarize', action='store_true',
                       help='Submit package for notarization after signing. '
-                           'Requires --sign and notarization credentials.')
-    parser.add_option('--apple-id',
-                      help='Apple ID email for notarization.')
-    parser.add_option('--team-id',
-                      help='Developer Team ID for notarization.')
-    parser.add_option('--app-password-env',
-                      help='Environment variable containing app-specific password '
+                           'Requires --sign, --api-issuer, --api-key, and .p8 file.')
+    parser.add_option('--api-issuer',
+                      help='App Store Connect API Issuer ID (Team ID UUID) '
                            'for notarization.')
+    parser.add_option('--api-key',
+                      help='App Store Connect API Key ID for notarization. '
+                           'Requires AuthKey_<ID>.p8 file in standard locations.')
     parser.add_option('--notarize-wait', action='store_true', default=True,
-                      help='Wait for notarization to complete. Default: True.')
+                      help='Wait for notarization to complete and staple. Default: True.')
     parser.add_option('--notarize-no-wait', action='store_false',
                       dest='notarize_wait',
                       help='Submit for notarization but don\'t wait for completion.')
@@ -1137,9 +1166,11 @@ def main():
         if not options.sign:
             print("ERROR: --notarize requires --sign", file=sys.stderr)
             sys.exit(-1)
-        if not options.apple_id or not options.team_id or not options.app_password_env:
-            print("ERROR: --notarize requires --apple-id, --team-id, and "
-                  "--app-password-env", file=sys.stderr)
+        if not options.api_issuer or not options.api_key:
+            print("ERROR: --notarize requires --api-issuer and --api-key", file=sys.stderr)
+            print("You also need an AuthKey_<ID>.p8 file in a standard location.",
+                  file=sys.stderr)
+            print("See: https://github.com/indygreg/apple-platform-rs", file=sys.stderr)
             sys.exit(-1)
 
     # Check for required dependencies
