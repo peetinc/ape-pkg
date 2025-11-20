@@ -245,6 +245,9 @@ def validate_build_info_keys(build_info, file_path):
         'ownership': ['recommended', 'preserve', 'preserve-other'],
         'postinstall_action': ['none', 'logout', 'restart'],
         'distribution_style': [True, False],
+        'preserve_xattr': [True, False],
+        'compression': ['legacy', 'latest'],
+        'large-payload': [True, False],
     }
     for key in valid_values:
         if key in build_info:
@@ -291,6 +294,8 @@ def default_build_info(project_dir):
     info['ownership'] = "recommended"
     info['postinstall_action'] = 'none'
     info['suppress_bundle_relocation'] = True  # Prevent bundle relocation
+    info['preserve_xattr'] = False  # Don't preserve extended attributes
+    info['compression'] = 'legacy'  # Use gzip compression (legacy)
     basename = os.path.basename(project_dir.rstrip('/')).replace(" ", "")
     info['name'] = basename + '-${version}.pkg'
     info['identifier'] = "com.github.apepkg." + basename
@@ -314,6 +319,10 @@ def get_build_info(project_dir, options):
         'postinstall_action',
         'distribution_style',
         'suppress_bundle_relocation',
+        'preserve_xattr',
+        'compression',
+        'min-os-version',
+        'large-payload',
     ]
     build_file = os.path.join(project_dir, BUILD_INFO_FILE)
     file_type = None
@@ -470,19 +479,39 @@ def create_packageinfo(build_info, flat_dir):
         bundles = find_bundles(build_info['payload'])
 
     # Start building PackageInfo XML
+    preserve_xattr = str(build_info.get('preserve_xattr', False)).lower()
+
+    # Build pkg-info opening tag
+    pkg_info_attrs = {
+        'postinstall': build_info['postinstall_action'],
+        'preserve_xattr': preserve_xattr,
+        'identifier': build_info['identifier'],
+        'version': build_info['version'],
+        'location': build_info['install_location'],
+        'apever': VERSION
+    }
+
+    pkg_info_tag = '<pkg-info postinstall-action="{postinstall}" preserve-xattr="{preserve_xattr}" format-version="2" identifier="{identifier}" version="{version}" generator-version="apepkg-{apever}" install-location="{location}" auth="root"'.format(**pkg_info_attrs)
+
+    # Add min-os-version if specified
+    if 'min-os-version' in build_info:
+        pkg_info_tag += ' min-os-version="{}"'.format(build_info['min-os-version'])
+
+    pkg_info_tag += '>'
+
+    # Build payload tag with optional large-payload attribute
+    payload_tag = '    <payload numberOfFiles="{files}" installKBytes="{size}"'.format(
+        files=num_files,
+        size=payload_size
+    )
+    if build_info.get('large-payload', False):
+        payload_tag += ' large-payload="true"'
+    payload_tag += '/>'
+
     packageinfo_lines = [
         '<?xml version="1.0" encoding="utf-8"?>',
-        '<pkg-info postinstall-action="{postinstall}" preserve-xattr="false" format-version="2" identifier="{identifier}" version="{version}" generator-version="apepkg-{apever}" install-location="{location}" auth="root">'.format(
-            identifier=build_info['identifier'],
-            version=build_info['version'],
-            location=build_info['install_location'],
-            postinstall=build_info['postinstall_action'],
-            apever=VERSION
-        ),
-        '    <payload numberOfFiles="{files}" installKBytes="{size}"/>'.format(
-            files=num_files,
-            size=payload_size
-        )
+        pkg_info_tag,
+        payload_tag
     ]
 
     # Add bundle information if any bundles were found
@@ -679,8 +708,8 @@ def create_bom(payload_dir, flat_dir, build_info, options):
     return bom_path
 
 
-def create_payload(payload_dir, flat_dir, options):
-    '''Create compressed payload using cpio and gzip'''
+def create_payload(payload_dir, flat_dir, build_info, options):
+    '''Create compressed payload using cpio and gzip/xz'''
     payload_path = os.path.join(flat_dir, 'Payload')
 
     # Change to payload directory and create cpio archive
@@ -697,15 +726,23 @@ def create_payload(payload_dir, flat_dir, options):
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         find_proc.stdout.close()
 
-        # Compress with gzip
+        # Compress with gzip (legacy) or xz (latest)
+        compression = build_info.get('compression', 'legacy')
+        if compression == 'latest':
+            # Use xz compression for 'latest'
+            compress_cmd = ['xz', '-c']
+        else:
+            # Use gzip for 'legacy' (default)
+            compress_cmd = [GZIP, '-c']
+
         with open(payload_path, 'wb') as payload_file:
-            gzip_proc = subprocess.Popen([GZIP, '-c'], stdin=cpio_proc.stdout,
+            compress_proc = subprocess.Popen(compress_cmd, stdin=cpio_proc.stdout,
                                         stdout=payload_file, stderr=subprocess.PIPE)
             cpio_proc.stdout.close()
-            gzip_stderr = gzip_proc.communicate()[1]
+            compress_stderr = compress_proc.communicate()[1]
 
-            if gzip_proc.returncode:
-                raise BuildError("gzip failed: %s" % gzip_stderr)
+            if compress_proc.returncode:
+                raise BuildError("%s failed: %s" % (compress_cmd[0], compress_stderr))
 
         cpio_stderr = cpio_proc.communicate()[1]
         if cpio_proc.returncode:
@@ -848,7 +885,7 @@ def build_component_pkg(build_info, options):
     # Create Bom if payload exists
     if build_info['payload']:
         create_bom(build_info['payload'], flat_dir, build_info, options)
-        create_payload(build_info['payload'], flat_dir, options)
+        create_payload(build_info['payload'], flat_dir, build_info, options)
 
     # Create Scripts if they exist
     if build_info['scripts']:

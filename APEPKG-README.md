@@ -156,6 +156,10 @@ The build-info file can be in plist (default), JSON, or YAML format.
     <string>none</string>
     <key>suppress_bundle_relocation</key>
     <true/>
+    <key>preserve_xattr</key>
+    <false/>
+    <key>compression</key>
+    <string>legacy</string>
     <key>version</key>
     <string>1.0</string>
 </dict>
@@ -172,6 +176,8 @@ The build-info file can be in plist (default), JSON, or YAML format.
     "ownership": "recommended",
     "postinstall_action": "none",
     "suppress_bundle_relocation": true,
+    "preserve_xattr": false,
+    "compression": "legacy",
     "version": "1.0"
 }
 ```
@@ -185,6 +191,8 @@ name: MyPackage-${version}.pkg
 ownership: recommended
 postinstall_action: none
 suppress_bundle_relocation: true
+preserve_xattr: false
+compression: legacy
 version: '1.0'
 ```
 
@@ -210,6 +218,18 @@ String. One of "none", "logout", or "restart". Default: "none"
 
 **suppress_bundle_relocation**
 Boolean. When true, prevents bundle relocation during installation. Default: true
+
+**preserve_xattr**
+Boolean. Preserve extended file attributes in installed files. Default: false
+
+**compression**
+String. Payload compression format. Options: "legacy" (gzip) or "latest" (xz). Default: "legacy"
+
+**min-os-version**
+String. Minimum macOS version required (e.g., "10.13", "11.0"). Optional.
+
+**large-payload**
+Boolean. Set to true for packages with very large payloads. Default: false
 
 **distribution_style**
 Boolean. Whether to build a distribution-style package. Default: true
