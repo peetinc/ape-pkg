@@ -643,27 +643,63 @@ def create_scripts(scripts_dir, flat_dir, options):
 def create_distribution(build_info, pkg_name, dist_dir):
     '''Create Distribution file for distribution-style package'''
 
-    distribution_content = '''<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<installer-gui-script minSpecVersion="1">
-    <title>{name}</title>
-    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
-    <pkg-ref id="{identifier}"/>
-    <choices-outline>
-        <line choice="default">
-            <line choice="{identifier}"/>
-        </line>
-    </choices-outline>
-    <choice id="default"/>
-    <choice id="{identifier}" visible="false">
-        <pkg-ref id="{identifier}"/>
-    </choice>
-    <pkg-ref id="{identifier}" version="{version}" onConclusion="none">{pkg_name}</pkg-ref>
-</installer-gui-script>'''.format(
-        name=build_info['name'].replace('.pkg', ''),
-        identifier=build_info['identifier'],
-        version=build_info['version'],
-        pkg_name=pkg_name
-    )
+    # Calculate payload size
+    payload_size = 0
+    if build_info['payload']:
+        payload_size = calculate_payload_size(build_info['payload'])
+
+    # Find bundles for bundle-version section
+    bundles = []
+    if build_info['payload']:
+        bundles = find_bundles(build_info['payload'])
+
+    # Start building Distribution XML
+    lines = ['<?xml version="1.0" encoding="utf-8"?>',
+             '<installer-gui-script minSpecVersion="1">']
+
+    # Add bundle-version section if bundles exist
+    if bundles:
+        lines.append('    <pkg-ref id="{identifier}">'.format(identifier=build_info['identifier']))
+        lines.append('        <bundle-version>')
+        for bundle in bundles:
+            # Remove leading ./ from path
+            bundle_path = bundle['path'].lstrip('./')
+            lines.append('            <bundle CFBundleShortVersionString="{version}" CFBundleVersion="{bundle_version}" id="{id}" path="{path}"/>'.format(**{
+                'version': bundle['version'],
+                'bundle_version': bundle['bundle_version'],
+                'id': bundle['id'],
+                'path': bundle_path
+            }))
+        lines.append('        </bundle-version>')
+        lines.append('    </pkg-ref>')
+
+    # Add options and choices
+    lines.extend([
+        '    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>',
+        '    <choices-outline>',
+        '        <line choice="default">',
+        '            <line choice="{identifier}"/>'.format(identifier=build_info['identifier']),
+        '        </line>',
+        '    </choices-outline>',
+        '    <choice id="default"/>',
+        '    <choice id="{identifier}" visible="false">'.format(identifier=build_info['identifier']),
+        '        <pkg-ref id="{identifier}"/>'.format(identifier=build_info['identifier']),
+        '    </choice>',
+        '    <pkg-ref id="{identifier}" version="{version}" onConclusion="{action}" installKBytes="{size}" updateKBytes="0">#{pkg_name}</pkg-ref>'.format(
+            identifier=build_info['identifier'],
+            version=build_info['version'],
+            action=build_info['postinstall_action'],
+            size=payload_size,
+            pkg_name=pkg_name
+        ),
+        '    <product id="{identifier}" version="{version}"/>'.format(
+            identifier=build_info['identifier'],
+            version=build_info['version']
+        ),
+        '</installer-gui-script>'
+    ])
+
+    distribution_content = '\n'.join(lines)
 
     distribution_path = os.path.join(dist_dir, 'Distribution')
     with open(distribution_path, 'w') as f:
@@ -675,7 +711,9 @@ def create_distribution(build_info, pkg_name, dist_dir):
 def build_component_pkg(build_info, options):
     '''Build component package using bomutils'''
 
-    flat_name = build_info['identifier'] + '.pkg'
+    # Component package name should match the distribution package name format
+    # Remove .pkg extension if present, then add it back
+    flat_name = build_info['name'].replace('.pkg', '') + '.pkg'
     flat_dir = os.path.join(build_info['tmpdir'], flat_name)
     os.makedirs(flat_dir)
 
