@@ -1,5 +1,7 @@
 # apepkg - Apple Package Engineer
 
+![APE Logo](resources/ape-pkg.png)
+
 **Build macOS packages on Linux**
 
 `apepkg` is a tool for building macOS installer packages (.pkg files) on Linux systems, compatible with [munki-pkg](https://github.com/munki/munki-pkg) project directories.
@@ -64,10 +66,12 @@ Your package is now at `MyPackage/build/MyPackage-1.0.pkg`!
 - Pre/post installation scripts
 - Custom install locations
 - Payload and payload-free packages
+- **Package importing** - Convert existing packages to projects
 - BOM export/sync for git workflows
 - Supports plist, JSON, and YAML build-info formats
 - **Code signing with Developer ID certificates** (via rcodesign)
 - **Apple notarization and ticket stapling** (via rcodesign)
+- Advanced build options (compression, min-os-version, large-payload, etc.)
 
 ## Code Signing & Notarization
 
@@ -328,7 +332,7 @@ You can use both apepkg and munki-pkg with the same project:
 munkipkg MyPackage
 ```
 
-Both produce identical packages (except apepkg packages are unsigned).
+Both produce identical packages. apepkg can also sign and notarize packages using rcodesign.
 
 ## License
 

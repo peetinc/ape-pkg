@@ -4,10 +4,11 @@
 
 | Aspect | munki-pkg | apepkg |
 |--------|-----------|----------|
-| **Platform** | macOS | Linux |
+| **Platform** | macOS | Linux / macOS |
 | **Purpose** | Build macOS packages on macOS | Build macOS packages on Linux |
 | **Project Compatibility** | munki-pkg only | Compatible with munki-pkg projects |
 | **Primary Use Case** | Local development on Mac | CI/CD pipelines, Linux development |
+| **Signing & Notarization** | Native Apple tools | rcodesign (cross-platform) |
 
 ## Core Functionality
 
@@ -41,43 +42,47 @@
 | `ownership` | ✅ | ✅ | recommended/preserve/preserve-other |
 | `postinstall_action` | ✅ | ✅ | none/logout/restart |
 | `distribution_style` | ✅ | ✅ | Always true in apepkg |
-| `suppress_bundle_relocation` | ✅ | ❌ | macOS-specific |
-| `preserve_xattr` | ✅ | ❌ | macOS-specific |
-| `compression` | ✅ | ❌ | macOS 12+ feature |
-| `min-os-version` | ✅ | ❌ | Could be added |
-| `large-payload` | ✅ | ❌ | macOS 12+ feature |
-| `signing_info` | ✅ | ❌ | Requires macOS tools |
-| `notarization_info` | ✅ | ❌ | Requires macOS tools |
-| `product id` | ✅ | ❌ | Distribution packages |
+| `suppress_bundle_relocation` | ✅ | ✅ | Prevents bundle relocation |
+| `preserve_xattr` | ✅ | ✅ | Preserve extended attributes |
+| `compression` | ✅ | ✅ | legacy (gzip) or latest (xz) |
+| `min-os-version` | ✅ | ✅ | Minimum macOS version |
+| `large-payload` | ✅ | ✅ | For very large payloads |
+| `signing_info` | ✅ | N/A | Use --sign option instead |
+| `notarization_info` | ✅ | N/A | Use --notarize option instead |
+| `product id` | ✅ | ✅ | Distribution packages |
 
 ## Advanced Features
 
 | Feature | munki-pkg | apepkg | Notes |
 |---------|-----------|----------|-------|
-| Import existing packages | ✅ Yes | ❌ No | May be added in future |
+| Import existing packages | ✅ Flat & bundle | ✅ Flat only | Bundle packages not supported |
 | Export BOM info | ✅ Yes | ✅ Yes | For git tracking |
 | Sync from BOM | ✅ Yes | ✅ Yes | Restore permissions |
-| Package signing | ✅ Yes | ❌ No | Requires Apple certificates |
-| Notarization | ✅ Yes | ❌ No | Requires Apple Developer account |
+| Package signing | ✅ Yes | ✅ Yes | Via rcodesign on Linux |
+| Notarization | ✅ Yes | ✅ Yes | Via rcodesign on Linux |
+| Notarization stapling | ✅ Yes | ✅ Yes | Via rcodesign on Linux |
 | Custom requirements plist | ✅ Yes | ❌ No | Could be added |
-| Bundle relocation control | ✅ Yes | ❌ No | macOS-specific |
-| Extended attributes | ✅ Yes | ❌ No | macOS-specific |
+| Bundle relocation control | ✅ Yes | ✅ Yes | suppress_bundle_relocation |
+| Extended attributes | ✅ Yes | ✅ Yes | preserve_xattr |
 
 ## Command-Line Options
 
 | Option | munki-pkg | apepkg | Notes |
 |--------|-----------|----------|-------|
 | `--create` | ✅ | ✅ | Create new project |
-| `--import PKG` | ✅ | ❌ | Import existing package |
+| `--import PKG` | ✅ | ✅ | Import existing package (flat only) |
 | `--json` | ✅ | ✅ | Use JSON build-info |
 | `--yaml` | ✅ | ✅ | Use YAML build-info |
 | `--export-bom-info` | ✅ | ✅ | Export BOM to text |
 | `--sync` | ✅ | ✅ | Sync from BOM.txt |
 | `--quiet` | ✅ | ✅ | Suppress output |
 | `--force` | ✅ | ✅ | Force overwrite |
-| `--skip-signing` | ✅ | N/A | Not applicable |
-| `--skip-notarization` | ✅ | N/A | Not applicable |
-| `--skip-stapling` | ✅ | N/A | Not applicable |
+| `--sign` | N/A | ✅ | Sign package (rcodesign) |
+| `--p12-file` | N/A | ✅ | Certificate file for signing |
+| `--p12-password` / `--p12-password-env` | N/A | ✅ | Certificate password |
+| `--notarize` | N/A | ✅ | Submit for notarization |
+| `--api-issuer` / `--api-key` | N/A | ✅ | App Store Connect API credentials |
+| `--notarize-wait` / `--notarize-no-wait` | N/A | ✅ | Wait for notarization completion |
 
 ## Underlying Tools
 
@@ -85,10 +90,11 @@
 |-----------|-----------|----------|-------|
 | BOM creation | pkgbuild | mkbom (bomutils) | |
 | BOM reading | lsbom | lsbom (bomutils) | |
-| Package building | pkgbuild | cpio + gzip | |
+| Payload compression | pkgbuild | cpio + gzip/xz | Configurable compression |
 | Distribution building | productbuild | xar | |
-| Archive format | pkgbuild | xar | |
-| Signing | productsign | - | Not supported |
+| Archive format | xar | xar | |
+| Signing | productsign | rcodesign | Cross-platform signing |
+| Notarization | notarytool | rcodesign | Cross-platform notarization |
 
 ## Dependencies
 
@@ -99,30 +105,30 @@
 - Optional: PyYAML for YAML support
 
 ### apepkg Requirements:
-- Linux operating system
+- Linux or macOS operating system
 - Python 3
 - bomutils (mkbom, lsbom)
 - xar
-- cpio, gzip (usually pre-installed)
+- cpio, gzip, xz (usually pre-installed)
 - Optional: PyYAML for YAML support
+- Optional: rcodesign for signing and notarization
 
 ## Use Cases
 
 ### When to use munki-pkg:
 ✅ Building packages on macOS
-✅ Need to sign packages
-✅ Need to notarize packages
-✅ Want to import existing packages
-✅ Working with extended attributes
+✅ Prefer native Apple tools (pkgbuild/productbuild)
+✅ Need to import bundle-style packages
 ✅ Local development on Mac
 
 ### When to use apepkg:
 ✅ Building packages in Linux CI/CD pipelines
-✅ Don't have access to macOS
-✅ Building unsigned packages for internal distribution
+✅ Don't have access to macOS for building
+✅ Need to sign/notarize on Linux (CI/CD)
 ✅ Using GitHub Actions, GitLab CI, or other Linux-based CI
 ✅ Cross-platform development teams
 ✅ Container-based builds
+✅ Want to build and sign packages entirely on Linux
 
 ### When you can use either:
 - Creating new packages from scratch
@@ -184,11 +190,12 @@ steps:
 
 **Distribution**:
 - Unsigned packages: Use apepkg output directly
-- Signed/notarized packages: Build with apepkg, then sign on macOS:
+- Signed/notarized packages: Use apepkg with rcodesign:
   ```bash
-  # Sign on macOS after building on Linux
-  productsign --sign "Developer ID Installer" \
-    MyProject.pkg MyProject-signed.pkg
+  # Build, sign, and notarize entirely on Linux
+  ./apepkg MyProject \
+    --sign --p12-file cert.p12 --p12-password-env CERT_PASSWORD \
+    --notarize --api-issuer TEAM_ID --api-key API_KEY_ID
   ```
 
 ## Output Package Compatibility
@@ -199,8 +206,7 @@ Both tools produce standard macOS installer packages (.pkg files) that:
 - ✅ Are recognized by macOS Installer.app
 - ✅ Can be deployed via MDM
 - ✅ Are compatible with Munki, Jamf, and other management tools
-
-The only difference is that apepkg packages are unsigned by default.
+- ✅ Can be signed and notarized (apepkg uses rcodesign)
 
 ## Project Structure Compatibility
 
@@ -220,8 +226,13 @@ MyProject/
 
 ## Summary
 
-**apepkg** is designed to be a Linux-compatible alternative to munki-pkg for building macOS packages. While it doesn't support signing or notarization (which require macOS), it handles the core package building functionality and maintains full compatibility with munki-pkg project structures.
+**apepkg** is designed to be a Linux-compatible alternative to munki-pkg for building macOS packages. It now supports the full feature set including:
+- ✅ All build-info keys (compression, min-os-version, large-payload, etc.)
+- ✅ Package signing via rcodesign (cross-platform)
+- ✅ Package notarization via rcodesign (cross-platform)
+- ✅ Package importing (flat packages)
+- ✅ Full munki-pkg project compatibility
 
-Use apepkg when you need to build macOS packages on Linux (especially in CI/CD), and use munki-pkg when you need the full feature set including signing and notarization on macOS.
+Use apepkg when you need to build macOS packages on Linux (especially in CI/CD), or when you want a cross-platform solution. Use munki-pkg when you prefer native Apple tools or need to import bundle-style packages.
 
 The two tools can be used interchangeably for the same projects, making it easy to support both platforms in your workflow.
