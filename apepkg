@@ -651,9 +651,11 @@ def create_bom(payload_dir, flat_dir, build_info, options):
         if retcode:
             raise BuildError("mkbom failed: %s" % stderr)
 
-        # If ownership is 'recommended', modify the BOM to use root:admin (0:80)
-        # We do this by: lsbom -> modify ownership -> mkbom -i
-        if ownership == 'recommended':
+        # Always modify the BOM to filter out .DS_Store files
+        # (they're excluded from Payload, so should be excluded from BOM)
+        # If ownership is 'recommended', also modify ownership to root:admin (0:80)
+        # We do this by: lsbom -> filter/modify -> mkbom -i
+        if True:  # Always process BOM to filter .DS_Store
             # Export current BOM to text (default lsbom format)
             temp_bom_txt = os.path.join(flat_dir, 'bom_temp.txt')
             cmd = [LSBOM, abs_bom]
@@ -663,17 +665,23 @@ def create_bom(payload_dir, flat_dir, build_info, options):
                 raise BuildError("lsbom failed: %s" % stderr)
 
             # Modify ownership in the output (change all ownership to 0/80)
+            # Also filter out .DS_Store files to match payload creation
             # Default lsbom format: path<TAB>mode<TAB>uid/gid[<TAB>size<TAB>checksum]
             modified_lines = []
             for line in stdout.strip().split('\n'):
                 if not line:
                     continue
                 parts = line.split('\t')
+                if len(parts) >= 1:
+                    # Skip .DS_Store files (they're excluded from Payload)
+                    path = parts[0]
+                    if path.endswith('.DS_Store') or '/.DS_Store' in path:
+                        continue
                 if len(parts) >= 2:
-                    # Replace UID/GID field (varies by position based on file type)
+                    # Replace UID/GID field if ownership is 'recommended'
                     # For directories: path mode uid/gid
                     # For files: path mode uid/gid size checksum
-                    if len(parts) >= 3:
+                    if ownership == 'recommended' and len(parts) >= 3:
                         # Has uid/gid field - replace it
                         parts[2] = '0/80'
                     modified_lines.append('\t'.join(parts))
