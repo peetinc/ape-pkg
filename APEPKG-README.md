@@ -26,13 +26,10 @@ apepkg is designed to be compatible with munki-pkg project directories. You can:
 - ✅ Postinstall actions (none/logout/restart)
 - ✅ BOM export and sync
 - ✅ Payload and payload-free packages
+- ✅ Package importing (flat packages)
 
 **Not supported (compared to munki-pkg):**
-- ❌ Package signing (requires Apple certificates and tools)
-- ❌ Notarization (requires Apple Developer account)
-- ❌ Package importing (may be added in future)
-- ❌ Bundle relocation options
-- ❌ Extended attributes preservation
+- ❌ Bundle-style package importing (only flat packages supported)
 
 ## Linux Prerequisites
 
@@ -316,10 +313,76 @@ You can create packages that only run scripts without installing files:
 1. **No payload directory**: Creates a package that leaves no receipt
 2. **Empty payload directory**: Creates a package that leaves a receipt but installs no files
 
+## Importing Packages
+
+apepkg can import existing flat packages and convert them into editable project directories. This is useful for:
+- Reverse engineering packages
+- Modifying existing packages
+- Converting packages from other tools to apepkg projects
+
+### Importing a Package
+
+```bash
+./apepkg --import /path/to/existing.pkg NewProject
+```
+
+This will:
+1. Extract the package (xar archive)
+2. Parse the Distribution and PackageInfo files
+3. Extract payload files to `payload/`
+4. Extract installation scripts to `scripts/`
+5. Export BOM to `Bom.txt`
+6. Create `build-info.plist` with extracted metadata
+
+### Example
+
+```bash
+# Import a package
+./apepkg --import ~/Downloads/MyApp-1.5.pkg MyAppProject
+
+# Modify the project
+# (edit files in payload/, modify scripts/, change build-info.plist)
+
+# Rebuild the package
+./apepkg MyAppProject
+
+# Result: MyAppProject/build/MyAppProject-1.5.pkg
+```
+
+### What Gets Imported
+
+The import process preserves:
+- **Identifier**: Package identifier (e.g., com.example.myapp)
+- **Version**: Package version number
+- **Install location**: Where files will be installed
+- **Postinstall action**: none/logout/restart
+- **Payload files**: All installed files with correct permissions
+- **Scripts**: preinstall and postinstall scripts
+- **BOM**: Bill of Materials exported to Bom.txt
+- **Bundle metadata**: .app bundle information
+- **Advanced settings**: min-os-version, large-payload, preserve_xattr, etc.
+
+### Limitations
+
+- Only flat packages (xar archives) are supported
+- Bundle-style packages (directory format) are not supported
+- The package name in build-info will be based on the project directory name, not the original package name
+
+### Using --force
+
+If the project directory already exists, use `--force` to overwrite:
+
+```bash
+./apepkg --import existing.pkg MyProject --force
+```
+
 ## Command-Line Options
 
 **--create**
 Create a new empty project directory with default settings.
+
+**--import PKG**
+Import an existing flat package and create a project directory from it.
 
 **--json**
 Create build-info file in JSON format (use with --create).
@@ -343,13 +406,13 @@ Force creation of project directory if it already exists.
 
 | Feature | munki-pkg | apepkg |
 |---------|-----------|----------|
-| Platform | macOS only | Linux only |
+| Platform | macOS only | Linux/macOS |
 | Build tool | pkgbuild/productbuild | bomutils/xar |
-| Signing | Supported | Not supported |
-| Notarization | Supported | Not supported |
-| Import packages | Supported | Not supported |
-| Bundle relocation | Supported | Not supported |
-| Extended attributes | Supported | Not supported |
+| Signing | Supported | Supported (via rcodesign) |
+| Notarization | Supported | Supported (via rcodesign) |
+| Import packages | Supported (flat & bundle) | Supported (flat only) |
+| Bundle relocation | Configurable | Configurable |
+| Extended attributes | Configurable | Configurable |
 | Project compatibility | - | Compatible with munki-pkg |
 
 ## Examples

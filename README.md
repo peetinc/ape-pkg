@@ -136,9 +136,32 @@ On macOS, export your certificate from Keychain:
 # Right-click → Export → Save as .p12 file with password
 ```
 
-## Not Supported
+## Package Importing
 
-❌ Package importing (may be added later)
+apepkg can import existing flat packages and convert them into apepkg projects:
+
+```bash
+# Import a package
+./apepkg --import /path/to/existing.pkg MyProject
+
+# The package will be extracted and converted to a project directory:
+MyProject/
+├── build-info.plist  # Metadata extracted from PackageInfo
+├── payload/          # Installed files
+├── scripts/          # Pre/post installation scripts
+├── Bom.txt          # Bill of Materials
+└── build/           # Output directory
+```
+
+**Supported:**
+- ✅ Distribution-style flat packages (xar archives)
+- ✅ Payload extraction
+- ✅ Scripts extraction
+- ✅ BOM export
+- ✅ Metadata preservation (identifier, version, install location, etc.)
+
+**Not Supported:**
+- ❌ Bundle-style packages (directory format)
 
 **Note**: Signing and notarization require valid Apple Developer certificates and credentials.
 
@@ -273,6 +296,7 @@ apepkg [options] pkg_project_directory
 
 Options:
   --create                  Create new empty project
+  --import <pkg>            Import existing package and create project
   --json                    Use JSON format for build-info
   --yaml                    Use YAML format for build-info
   --export-bom-info         Export BOM to Bom.txt

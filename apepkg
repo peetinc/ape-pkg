@@ -1112,6 +1112,333 @@ def valid_project_dir(project_dir):
     return True
 
 
+def detect_pkg_type(pkg_path):
+    '''Detect if package is flat (xar) or bundle (directory)'''
+    if not os.path.exists(pkg_path):
+        raise PkgImportError("Package not found: %s" % pkg_path)
+
+    if os.path.isdir(pkg_path):
+        # Bundle-style package (directory)
+        return 'bundle'
+    else:
+        # Flat package (xar archive)
+        return 'flat'
+
+
+def import_package(pkg_path, project_dir, options):
+    '''Import an existing package and create a project directory'''
+
+    try:
+        # Validate input
+        if not os.path.exists(pkg_path):
+            raise PkgImportError("Package not found: %s" % pkg_path)
+
+        # Detect package type
+        pkg_type = detect_pkg_type(pkg_path)
+        display("Detected %s package" % pkg_type, options.quiet)
+
+        # Create project directory if it doesn't exist
+        if os.path.exists(project_dir):
+            if not options.force:
+                raise PkgImportError(
+                    "Project directory %s already exists! Use --force to overwrite."
+                    % project_dir)
+            shutil.rmtree(project_dir)
+
+        os.makedirs(project_dir)
+
+        # Import based on package type
+        if pkg_type == 'flat':
+            import_flat_package(pkg_path, project_dir, options)
+        else:
+            raise PkgImportError(
+                "Bundle-style packages not yet supported. Please use flat packages.")
+
+        display("Package imported successfully to %s" % project_dir, options.quiet)
+        return 0
+
+    except PkgImportError as err:
+        print('ERROR: %s' % err, file=sys.stderr)
+        return -1
+    except Exception as err:
+        print('ERROR: Unexpected error during import: %s' % err, file=sys.stderr)
+        return -1
+
+
+def import_flat_package(pkg_path, project_dir, options):
+    '''Import a flat package'''
+
+    # Create temporary directory for extraction
+    tmpdir = tempfile.mkdtemp()
+
+    try:
+        display("Extracting package...", options.quiet)
+
+        # Extract xar archive
+        cmd = [XAR, '-x', '-C', tmpdir, '-f', pkg_path]
+        retcode, stdout, stderr = run_subprocess(cmd)
+
+        if retcode:
+            raise PkgImportError("Failed to extract package: %s" % stderr)
+
+        # Find Distribution file to identify component package(s)
+        distribution_file = os.path.join(tmpdir, 'Distribution')
+
+        if not os.path.exists(distribution_file):
+            raise PkgImportError(
+                "Distribution file not found. Only distribution-style packages "
+                "are supported.")
+
+        # Parse Distribution to find component package
+        component_pkg = find_component_package(tmpdir, distribution_file)
+
+        if not component_pkg:
+            raise PkgImportError("No component package found in Distribution file")
+
+        component_path = os.path.join(tmpdir, component_pkg)
+
+        # Extract metadata from PackageInfo
+        packageinfo_path = os.path.join(component_path, 'PackageInfo')
+        if not os.path.exists(packageinfo_path):
+            raise PkgImportError("PackageInfo not found in component package")
+
+        build_info = parse_packageinfo(packageinfo_path, project_dir)
+
+        # Create project structure
+        payload_dir = os.path.join(project_dir, 'payload')
+        scripts_dir = os.path.join(project_dir, 'scripts')
+        build_dir = os.path.join(project_dir, 'build')
+
+        os.makedirs(payload_dir)
+        os.makedirs(scripts_dir)
+        os.makedirs(build_dir)
+
+        # Extract payload if it exists
+        payload_file = os.path.join(component_path, 'Payload')
+        if os.path.exists(payload_file):
+            display("Extracting payload...", options.quiet)
+            extract_payload(payload_file, payload_dir, build_info, options)
+
+        # Extract scripts if they exist
+        scripts_file = os.path.join(component_path, 'Scripts')
+        if os.path.exists(scripts_file):
+            display("Extracting scripts...", options.quiet)
+            extract_scripts(scripts_file, scripts_dir, options)
+
+        # Export BOM info
+        bom_file = os.path.join(component_path, 'Bom')
+        if os.path.exists(bom_file):
+            display("Exporting BOM info...", options.quiet)
+            export_bom_from_file(bom_file, project_dir, options)
+
+        # Write build-info file
+        write_build_info(build_info, project_dir, options)
+
+        # Create .gitignore
+        create_default_gitignore(project_dir)
+
+    finally:
+        # Cleanup temp directory
+        if os.path.exists(tmpdir):
+            shutil.rmtree(tmpdir)
+
+
+def find_component_package(tmpdir, distribution_file):
+    '''Parse Distribution file to find component package name'''
+    try:
+        with open(distribution_file, 'r') as f:
+            content = f.read()
+
+        # Parse XML to find pkg-ref with file reference
+        dom = minidom.parseString(content)
+
+        # Look for <pkg-ref> elements with text content (component filename)
+        # The text content typically looks like "#ComponentName.pkg"
+        for pkg_ref in dom.getElementsByTagName('pkg-ref'):
+            # Iterate through child nodes to find text nodes
+            for child in pkg_ref.childNodes:
+                if child.nodeType == child.TEXT_NODE:
+                    pkg_name = child.data.strip()
+                    if pkg_name:
+                        # Remove leading # if present
+                        pkg_name = pkg_name.lstrip('#')
+                        # Check if this package exists in tmpdir
+                        if os.path.exists(os.path.join(tmpdir, pkg_name)):
+                            return pkg_name
+
+        # Fallback: find any .pkg directory in tmpdir
+        for item in os.listdir(tmpdir):
+            if item.endswith('.pkg') and os.path.isdir(os.path.join(tmpdir, item)):
+                return item
+
+        return None
+
+    except Exception as err:
+        raise PkgImportError("Failed to parse Distribution file: %s" % err)
+
+
+def parse_packageinfo(packageinfo_path, project_dir):
+    '''Parse PackageInfo XML and return build_info dict'''
+    try:
+        dom = minidom.parse(packageinfo_path)
+        pkg_info = dom.getElementsByTagName('pkg-info')[0]
+
+        # Extract basic attributes
+        identifier = pkg_info.getAttribute('identifier')
+        version = pkg_info.getAttribute('version')
+        install_location = pkg_info.getAttribute('install-location') or '/'
+        postinstall_action = pkg_info.getAttribute('postinstall-action') or 'none'
+        preserve_xattr = pkg_info.getAttribute('preserve-xattr') == 'true'
+        min_os_version = pkg_info.getAttribute('min-os-version')
+
+        # Generate name from project directory
+        basename = os.path.basename(project_dir.rstrip('/')).replace(" ", "")
+        name = basename + '-${version}.pkg'
+
+        # Build info dict
+        build_info = {
+            'identifier': identifier,
+            'version': version,
+            'name': name,
+            'install_location': install_location,
+            'postinstall_action': postinstall_action,
+            'ownership': 'recommended',  # Default
+            'preserve_xattr': preserve_xattr,
+            'distribution_style': True,
+            'suppress_bundle_relocation': True,  # Default
+            'compression': 'legacy',  # Default
+        }
+
+        if min_os_version:
+            build_info['min-os-version'] = min_os_version
+
+        # Check for large-payload attribute on payload element
+        payload_elements = dom.getElementsByTagName('payload')
+        if payload_elements:
+            payload = payload_elements[0]
+            if payload.getAttribute('large-payload') == 'true':
+                build_info['large-payload'] = True
+
+        # Check for relocate element (if present, suppress_bundle_relocation is False)
+        relocate_elements = dom.getElementsByTagName('relocate')
+        if relocate_elements:
+            build_info['suppress_bundle_relocation'] = False
+
+        return build_info
+
+    except Exception as err:
+        raise PkgImportError("Failed to parse PackageInfo: %s" % err)
+
+
+def extract_payload(payload_file, payload_dir, build_info, options):
+    '''Extract payload archive to payload directory'''
+    try:
+        # Determine compression type by checking file signature
+        with open(payload_file, 'rb') as f:
+            magic = f.read(6)
+
+        # Check for gzip magic (1f 8b) or xz magic (fd 37 7a 58 5a 00)
+        if magic[:2] == b'\x1f\x8b':
+            decompress_cmd = ['gunzip', '-c', payload_file]
+        elif magic[:6] == b'\xfd7zXZ\x00':
+            decompress_cmd = ['xz', '-d', '-c', payload_file]
+        else:
+            raise PkgImportError("Unknown payload compression format")
+
+        # Decompress and extract with cpio
+        original_dir = os.getcwd()
+        try:
+            os.chdir(payload_dir)
+
+            decompress_proc = subprocess.Popen(
+                decompress_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            cpio_cmd = [CPIO, '-i']
+            cpio_proc = subprocess.Popen(
+                cpio_cmd,
+                stdin=decompress_proc.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            decompress_proc.stdout.close()
+            cpio_stdout, cpio_stderr = cpio_proc.communicate()
+
+            if cpio_proc.returncode:
+                raise PkgImportError("cpio extraction failed: %s" % cpio_stderr.decode())
+
+            decompress_stderr = decompress_proc.stderr.read()
+            if decompress_proc.returncode:
+                raise PkgImportError("Decompression failed: %s" % decompress_stderr.decode())
+
+        finally:
+            os.chdir(original_dir)
+
+    except Exception as err:
+        raise PkgImportError("Failed to extract payload: %s" % err)
+
+
+def extract_scripts(scripts_file, scripts_dir, options):
+    '''Extract scripts archive to scripts directory'''
+    try:
+        # Scripts are always gzip-compressed cpio
+        original_dir = os.getcwd()
+        try:
+            os.chdir(scripts_dir)
+
+            gunzip_proc = subprocess.Popen(
+                ['gunzip', '-c', scripts_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            cpio_cmd = [CPIO, '-i']
+            cpio_proc = subprocess.Popen(
+                cpio_cmd,
+                stdin=gunzip_proc.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            gunzip_proc.stdout.close()
+            cpio_stdout, cpio_stderr = cpio_proc.communicate()
+
+            if cpio_proc.returncode:
+                raise PkgImportError("cpio extraction failed: %s" % cpio_stderr.decode())
+
+            # Remove the '.' directory marker if it exists
+            dot_path = os.path.join(scripts_dir, '.')
+            if os.path.exists(dot_path) and os.path.isfile(dot_path):
+                os.remove(dot_path)
+
+        finally:
+            os.chdir(original_dir)
+
+    except Exception as err:
+        raise PkgImportError("Failed to extract scripts: %s" % err)
+
+
+def export_bom_from_file(bom_file, project_dir, options):
+    '''Export BOM file to Bom.txt in project directory'''
+    try:
+        destination = os.path.join(project_dir, BOM_TEXT_FILE)
+
+        cmd = [LSBOM, bom_file]
+        retcode, stdout, stderr = run_subprocess(cmd)
+
+        if retcode:
+            raise PkgImportError("lsbom failed: %s" % stderr)
+
+        with open(destination, 'w') as f:
+            f.write(stdout)
+
+    except Exception as err:
+        raise PkgImportError("Failed to export BOM info: %s" % err)
+
+
 def main():
     '''Main'''
     usage = """usage: %prog [options] pkg_project_directory
@@ -1165,6 +1492,9 @@ def main():
     parser.add_option('--notarize-no-wait', action='store_false',
                       dest='notarize_wait',
                       help='Submit for notarization but don\'t wait for completion.')
+    parser.add_option('--import', dest='import_pkg',
+                      help='Import an existing flat package and create a project '
+                           'directory from it.')
 
     options, arguments = parser.parse_args()
 
@@ -1222,6 +1552,10 @@ def main():
 
     if options.create:
         result = create_template_project(arguments[0], options)
+        sys.exit(result)
+
+    if options.import_pkg:
+        result = import_package(options.import_pkg, arguments[0], options)
         sys.exit(result)
 
     # Options past here require a valid project_dir
