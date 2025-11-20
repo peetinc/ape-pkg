@@ -1,5 +1,7 @@
 # munki-pkg vs apepkg: Feature Comparison
 
+> **Note**: apepkg is a Linux port of munki-pkg by Greg Neagle. All credit for the project structure and design goes to the munki-pkg project. **If you're on macOS, use munki-pkg instead** - it's the original and uses native Apple tools.
+
 ## Overview
 
 | Aspect | munki-pkg | apepkg |
@@ -116,12 +118,15 @@
 ## Use Cases
 
 ### When to use munki-pkg:
+✅ **You're on macOS** (always prefer munki-pkg on macOS)
 ✅ Building packages on macOS
 ✅ Prefer native Apple tools (pkgbuild/productbuild)
 ✅ Need to import bundle-style packages
 ✅ Local development on Mac
+✅ Original tool with full Apple platform integration
 
 ### When to use apepkg:
+✅ **You're on Linux** (apepkg is designed for Linux)
 ✅ Building packages in Linux CI/CD pipelines
 ✅ Don't have access to macOS for building
 ✅ Need to sign/notarize on Linux (CI/CD)
@@ -129,6 +134,8 @@
 ✅ Cross-platform development teams
 ✅ Container-based builds
 ✅ Want to build and sign packages entirely on Linux
+
+⚠️ **Not recommended for macOS users** - use munki-pkg instead
 
 ### When you can use either:
 - Creating new packages from scratch
@@ -226,13 +233,17 @@ MyProject/
 
 ## Summary
 
-**apepkg** is designed to be a Linux-compatible alternative to munki-pkg for building macOS packages. It now supports the full feature set including:
+**apepkg** is a Linux port of munki-pkg by Greg Neagle, designed for building macOS packages on Linux systems. All credit for the project structure, build-info format, and workflow design goes to the munki-pkg project.
+
+apepkg now supports the full feature set including:
 - ✅ All build-info keys (compression, min-os-version, large-payload, etc.)
 - ✅ Package signing via rcodesign (cross-platform)
 - ✅ Package notarization via rcodesign (cross-platform)
 - ✅ Package importing (flat packages)
 - ✅ Full munki-pkg project compatibility
 
-Use apepkg when you need to build macOS packages on Linux (especially in CI/CD), or when you want a cross-platform solution. Use munki-pkg when you prefer native Apple tools or need to import bundle-style packages.
+**Recommendation**:
+- **On macOS**: Use [munki-pkg](https://github.com/munki/munki-pkg) (the original, with native Apple tools)
+- **On Linux**: Use apepkg (for CI/CD pipelines and Linux development)
 
 The two tools can be used interchangeably for the same projects, making it easy to support both platforms in your workflow.

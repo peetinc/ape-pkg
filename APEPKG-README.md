@@ -2,12 +2,16 @@
 
 ## Introduction
 
-**apepkg** is a tool for building macOS installer packages (.pkg files) on Linux systems. It is designed to be compatible with [munki-pkg](https://github.com/munki/munki-pkg) project directories, allowing you to create the same packages that munki-pkg creates, but without requiring macOS.
+**apepkg** is a Linux port of [munki-pkg](https://github.com/munki/munki-pkg) by Greg Neagle, designed for building macOS installer packages (.pkg files) on Linux systems. It maintains 100% compatibility with munki-pkg project directories, allowing you to create the same packages that munki-pkg creates, but without requiring macOS.
+
+> **⚠️ Important**: If you're on macOS, please use [munki-pkg](https://github.com/munki/munki-pkg) instead. apepkg is specifically designed for Linux environments where munki-pkg's native Apple tools aren't available.
+
+**Credit**: All credit for the project structure, build-info format, and workflow design goes to **Greg Neagle** and the [munki-pkg project](https://github.com/munki/munki-pkg).
 
 While munki-pkg uses Apple's `pkgbuild` and `productbuild` tools (which only run on macOS), apepkg uses open-source alternatives:
 - **bomutils** (mkbom/lsbom) for creating Bill of Materials files
 - **xar** for creating the package archive
-- **cpio** and **gzip** for payload compression
+- **cpio** and **gzip/xz** for payload compression
 
 This allows you to build macOS packages in CI/CD pipelines running on Linux, or on Linux development machines.
 

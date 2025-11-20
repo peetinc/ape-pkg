@@ -4,13 +4,25 @@
 
 **Build macOS packages on Linux**
 
-`apepkg` is a tool for building macOS installer packages (.pkg files) on Linux systems, compatible with [munki-pkg](https://github.com/munki/munki-pkg) project directories.
+`apepkg` is a Linux port of [munki-pkg](https://github.com/munki/munki-pkg) by Greg Neagle, designed for building macOS installer packages (.pkg files) on Linux systems.
+
+> **⚠️ Important**: If you're on macOS, use [munki-pkg](https://github.com/munki/munki-pkg) instead. apepkg is specifically designed for Linux environments where munki-pkg's native Apple tools aren't available.
 
 ## What does APE stand for?
 
 **APE** = **A**pple **P**ackage **E**ngineer
 
 Just like how munki-pkg helps you build packages on macOS, apepkg engineers your Apple packages on Linux!
+
+## About This Project
+
+apepkg is a Linux-compatible implementation of munki-pkg's functionality. All credit for the project structure, build-info format, and workflow design goes to **Greg Neagle** and the [munki-pkg project](https://github.com/munki/munki-pkg).
+
+Key differences:
+- **munki-pkg**: Uses Apple's native tools (pkgbuild, productbuild) on macOS
+- **apepkg**: Uses open-source tools (bomutils, xar) on Linux
+
+Both tools maintain 100% project compatibility - you can use the same project directories with either tool.
 
 ## Quick Start
 
@@ -325,14 +337,14 @@ Signing & Notarization:
 You can use both apepkg and munki-pkg with the same project:
 
 ```bash
-# On Linux
+# On Linux (use apepkg)
 ./apepkg MyPackage
 
-# On macOS
+# On macOS (use munki-pkg)
 munkipkg MyPackage
 ```
 
-Both produce identical packages. apepkg can also sign and notarize packages using rcodesign.
+Both produce identical packages. **Recommendation**: Use munki-pkg on macOS (native Apple tools), and apepkg on Linux (CI/CD pipelines).
 
 ## License
 
@@ -340,11 +352,15 @@ Licensed under the Apache License, Version 2.0
 
 ## Credits
 
-- Compatible with [munki-pkg](https://github.com/munki/munki-pkg) by Greg Neagle
-- Uses [bomutils](https://github.com/hogliux/bomutils) by Joseph Coffland
-- Uses [xar](https://github.com/mackyle/xar)
-- Code signing via [rcodesign](https://github.com/indygreg/apple-platform-rs) by Gregory Szorc
-- Inspired by [GytPol's blog post](https://gytpol.com/blog/automating-mac-software-package-process-on-a-linux-based-os)
+apepkg is a Linux port of munki-pkg. All credit for the original concept, project structure, and workflow goes to:
+
+- **[munki-pkg](https://github.com/munki/munki-pkg)** by **Greg Neagle** - The original macOS package building tool that this project is based on
+
+Additional tools and inspiration:
+- [bomutils](https://github.com/hogliux/bomutils) by Joseph Coffland - BOM creation on Linux
+- [xar](https://github.com/mackyle/xar) - Package archive format
+- [rcodesign](https://github.com/indygreg/apple-platform-rs) by Gregory Szorc - Cross-platform code signing
+- [GytPol's blog post](https://gytpol.com/blog/automating-mac-software-package-process-on-a-linux-based-os) - Initial inspiration for Linux package building
 
 ## Contributing
 
