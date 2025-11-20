@@ -104,6 +104,101 @@ def check_dependencies():
     return True
 
 
+def check_rcodesign():
+    '''Check if rcodesign is available for signing'''
+    if shutil.which('rcodesign') is None:
+        print("ERROR: rcodesign not found. Required for --sign option.",
+              file=sys.stderr)
+        print("Install from: https://github.com/indygreg/apple-platform-rs",
+              file=sys.stderr)
+        print("Or use cargo: cargo install apple-codesign",
+              file=sys.stderr)
+        return False
+    return True
+
+
+def sign_package(pkg_path, options):
+    '''Sign package using rcodesign'''
+    if not options.sign:
+        return True
+
+    display("Signing package...", options.quiet)
+
+    # Get certificate password
+    password = None
+    if options.p12_password_env:
+        password = os.environ.get(options.p12_password_env)
+        if not password:
+            raise BuildError(
+                f"Environment variable {options.p12_password_env} not set")
+    elif options.p12_password:
+        password = options.p12_password
+
+    # Build signing command
+    temp_pkg = pkg_path + '.tmp'
+    cmd = ['rcodesign', 'sign',
+           '--p12-file', options.p12_file,
+           '--p12-password', password,
+           pkg_path, temp_pkg]
+
+    retcode, stdout, stderr = run_subprocess(cmd)
+    if retcode:
+        raise BuildError(f"rcodesign sign failed: {stderr}")
+
+    # Replace original with signed version
+    os.rename(temp_pkg, pkg_path)
+
+    display("Package signed successfully", options.quiet)
+    return True
+
+
+def notarize_package(pkg_path, options):
+    '''Submit package for notarization and optionally wait for completion'''
+    if not options.notarize:
+        return True
+
+    display("Submitting package for notarization...", options.quiet)
+
+    # Get app password from environment
+    app_password = os.environ.get(options.app_password_env)
+    if not app_password:
+        raise BuildError(
+            f"Environment variable {options.app_password_env} not set")
+
+    # Submit for notarization
+    cmd = ['rcodesign', 'notary-submit',
+           '--api-issuer', options.team_id,
+           '--api-key', options.apple_id,
+           '--api-key-password', app_password]
+
+    if options.notarize_wait:
+        cmd.append('--wait')
+
+    cmd.append(pkg_path)
+
+    retcode, stdout, stderr = run_subprocess(cmd)
+    if retcode:
+        raise BuildError(f"Notarization failed: {stderr}")
+
+    display("Notarization submitted successfully", options.quiet)
+
+    if options.notarize_wait:
+        display("Notarization completed successfully", options.quiet)
+
+        # Staple the notarization ticket
+        display("Stapling notarization ticket...", options.quiet)
+        cmd = ['rcodesign', 'staple', pkg_path]
+        retcode, stdout, stderr = run_subprocess(cmd)
+        if retcode:
+            raise BuildError(f"Stapling failed: {stderr}")
+
+        display("Notarization ticket stapled successfully", options.quiet)
+    else:
+        display("Notarization submitted (not waiting for completion)", options.quiet)
+
+    return True
+
+
 def readPlistFromString(data):
     '''Wrapper for the differences between Python 2 and Python 3's plistlib'''
     try:
@@ -913,9 +1008,18 @@ def build(project_dir, options):
             export_bom_info(build_info, options)
 
         # Build distribution package
+        output_pkg = None
         if build_info.get('distribution_style', True):
             display("Building distribution package...", options.quiet)
-            build_distribution_pkg(build_info, flat_pkg_dir, options)
+            output_pkg = build_distribution_pkg(build_info, flat_pkg_dir, options)
+
+        # Sign package if requested
+        if output_pkg and options.sign:
+            sign_package(output_pkg, options)
+
+        # Notarize package if requested
+        if output_pkg and options.notarize:
+            notarize_package(output_pkg, options)
 
         # Cleanup temp dir
         shutil.rmtree(build_info['tmpdir'])
@@ -970,6 +1074,31 @@ def main():
     parser.add_option('-f', '--force', action='store_true',
                       help='Forces creation of project directory if it already '
                            'exists.')
+    parser.add_option('--sign', action='store_true',
+                      help='Sign the package after building. Requires rcodesign.')
+    parser.add_option('--p12-file',
+                      help='Path to PKCS#12 (.p12) certificate file for signing.')
+    parser.add_option('--p12-password',
+                      help='Password for PKCS#12 certificate. WARNING: Visible in '
+                           'process list! Use --p12-password-env instead.')
+    parser.add_option('--p12-password-env',
+                      help='Environment variable containing PKCS#12 password. '
+                           'More secure than --p12-password.')
+    parser.add_option('--notarize', action='store_true',
+                      help='Submit package for notarization after signing. '
+                           'Requires --sign and notarization credentials.')
+    parser.add_option('--apple-id',
+                      help='Apple ID email for notarization.')
+    parser.add_option('--team-id',
+                      help='Developer Team ID for notarization.')
+    parser.add_option('--app-password-env',
+                      help='Environment variable containing app-specific password '
+                           'for notarization.')
+    parser.add_option('--notarize-wait', action='store_true', default=True,
+                      help='Wait for notarization to complete. Default: True.')
+    parser.add_option('--notarize-no-wait', action='store_false',
+                      dest='notarize_wait',
+                      help='Submit for notarization but don\'t wait for completion.')
 
     options, arguments = parser.parse_args()
 
@@ -992,10 +1121,36 @@ def main():
               file=sys.stderr)
         sys.exit(-1)
 
+    # Validate signing options
+    if options.sign:
+        if not options.p12_file and not options.p12_password and not options.p12_password_env:
+            print("ERROR: --sign requires --p12-file and either --p12-password or "
+                  "--p12-password-env", file=sys.stderr)
+            sys.exit(-1)
+        if options.p12_file and not (options.p12_password or options.p12_password_env):
+            print("ERROR: --p12-file requires either --p12-password or "
+                  "--p12-password-env", file=sys.stderr)
+            sys.exit(-1)
+
+    # Validate notarization options
+    if options.notarize:
+        if not options.sign:
+            print("ERROR: --notarize requires --sign", file=sys.stderr)
+            sys.exit(-1)
+        if not options.apple_id or not options.team_id or not options.app_password_env:
+            print("ERROR: --notarize requires --apple-id, --team-id, and "
+                  "--app-password-env", file=sys.stderr)
+            sys.exit(-1)
+
     # Check for required dependencies
     if not options.create and not options.sync:
         if not check_dependencies():
             sys.exit(-1)
+
+        # Check for rcodesign if signing requested
+        if options.sign:
+            if not check_rcodesign():
+                sys.exit(-1)
 
     if options.create:
         result = create_template_project(arguments[0], options)

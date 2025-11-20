@@ -51,6 +51,7 @@ Your package is now at `MyPackage/build/MyPackage-1.0.pkg`!
 ## Why apepkg?
 
 ✅ **Linux-based CI/CD** - Build macOS packages in GitHub Actions, GitLab CI, etc.
+✅ **Code signing & notarization** - Sign and notarize packages on Linux with rcodesign
 ✅ **munki-pkg compatible** - Use the same project structure
 ✅ **Open source tools** - Uses bomutils and xar instead of proprietary Apple tools
 ✅ **Git-friendly** - Export/sync BOM for version control
@@ -65,14 +66,70 @@ Your package is now at `MyPackage/build/MyPackage-1.0.pkg`!
 - Payload and payload-free packages
 - BOM export/sync for git workflows
 - Supports plist, JSON, and YAML build-info formats
+- **Code signing with Developer ID certificates** (via rcodesign)
+- **Apple notarization and ticket stapling** (via rcodesign)
+
+## Code Signing & Notarization
+
+apepkg supports signing and notarizing packages on Linux using [rcodesign](https://github.com/indygreg/apple-platform-rs):
+
+### Install rcodesign
+
+```bash
+# Using cargo
+cargo install apple-codesign
+
+# Or download pre-built binaries from:
+# https://github.com/indygreg/apple-platform-rs/releases
+```
+
+### Sign a Package
+
+```bash
+# Sign with Developer ID Installer certificate
+./apepkg MyPackage \
+  --sign \
+  --p12-file ~/certs/developer-id-installer.p12 \
+  --p12-password-env CERT_PASSWORD
+```
+
+### Sign and Notarize
+
+```bash
+# Build, sign, and submit for notarization
+./apepkg MyPackage \
+  --sign \
+  --p12-file ~/certs/developer-id-installer.p12 \
+  --p12-password-env CERT_PASSWORD \
+  --notarize \
+  --apple-id your.email@example.com \
+  --team-id TEAM123456 \
+  --app-password-env NOTARY_PASSWORD
+```
+
+**Prerequisites for signing:**
+- Apple Developer ID Installer certificate (.p12 file)
+- Export from macOS Keychain or obtain from Apple Developer portal
+
+**Prerequisites for notarization:**
+- Apple ID with app-specific password
+- Developer Team ID
+- Valid Developer ID certificate
+
+### Obtaining Certificates
+
+On macOS, export your certificate from Keychain:
+
+```bash
+# Open Keychain Access, find your "Developer ID Installer" certificate
+# Right-click → Export → Save as .p12 file with password
+```
 
 ## Not Supported
 
-❌ Package signing (requires macOS and Apple certificates)
-❌ Notarization (requires Apple Developer account)
 ❌ Package importing (may be added later)
 
-**Note**: You can build unsigned packages with apepkg and sign them later on macOS if needed.
+**Note**: Signing and notarization require valid Apple Developer certificates and credentials.
 
 ## Documentation
 
@@ -100,7 +157,7 @@ MyPackage/
 
 ## CI/CD Example
 
-### GitHub Actions
+### GitHub Actions (Build Only)
 
 ```yaml
 name: Build Package
@@ -121,6 +178,58 @@ jobs:
           name: package
           path: MyPackage/build/*.pkg
 ```
+
+### GitHub Actions (Build, Sign & Notarize)
+
+```yaml
+name: Build and Sign Package
+on: [push]
+
+jobs:
+  build-and-sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install apepkg dependencies
+        run: ./INSTALL.sh
+
+      - name: Install rcodesign
+        run: cargo install apple-codesign
+
+      - name: Decode certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+        run: |
+          echo "$CERTIFICATE_BASE64" | base64 --decode > cert.p12
+
+      - name: Build, sign, and notarize package
+        env:
+          CERT_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+        run: |
+          ./apepkg MyPackage \
+            --sign \
+            --p12-file cert.p12 \
+            --p12-password-env CERT_PASSWORD \
+            --notarize \
+            --apple-id ${{ secrets.APPLE_ID }} \
+            --team-id ${{ secrets.TEAM_ID }} \
+            --app-password-env NOTARY_PASSWORD
+
+      - name: Upload signed package
+        uses: actions/upload-artifact@v2
+        with:
+          name: signed-package
+          path: MyPackage/build/*.pkg
+```
+
+**Required GitHub Secrets:**
+- `DEVELOPER_ID_INSTALLER_P12_BASE64` - Your .p12 certificate (base64 encoded)
+- `P12_PASSWORD` - Certificate password
+- `APPLE_ID` - Your Apple ID email
+- `TEAM_ID` - Your Developer Team ID
+- `NOTARY_APP_PASSWORD` - App-specific password for notarization
 
 ## Requirements
 
@@ -146,13 +255,25 @@ Supported distributions:
 apepkg [options] pkg_project_directory
 
 Options:
-  --create              Create new empty project
-  --json                Use JSON format for build-info
-  --yaml                Use YAML format for build-info
-  --export-bom-info     Export BOM to Bom.txt
-  --sync                Sync permissions from Bom.txt
-  --quiet               Suppress status messages
-  -f, --force           Force creation if directory exists
+  --create                  Create new empty project
+  --json                    Use JSON format for build-info
+  --yaml                    Use YAML format for build-info
+  --export-bom-info         Export BOM to Bom.txt
+  --sync                    Sync permissions from Bom.txt
+  --quiet                   Suppress status messages
+  -f, --force               Force creation if directory exists
+
+Signing & Notarization:
+  --sign                    Sign the package (requires rcodesign)
+  --p12-file <path>         Path to .p12 certificate file
+  --p12-password <pass>     Certificate password (use --p12-password-env instead)
+  --p12-password-env <var>  Environment variable with certificate password
+  --notarize                Submit for notarization (requires --sign)
+  --apple-id <email>        Apple ID for notarization
+  --team-id <id>            Developer Team ID
+  --app-password-env <var>  Environment variable with app-specific password
+  --notarize-wait           Wait for notarization to complete (default)
+  --notarize-no-wait        Don't wait for notarization completion
 ```
 
 ## Hybrid Workflow (Linux + macOS)
@@ -178,6 +299,7 @@ Licensed under the Apache License, Version 2.0
 - Compatible with [munki-pkg](https://github.com/munki/munki-pkg) by Greg Neagle
 - Uses [bomutils](https://github.com/hogliux/bomutils) by Joseph Coffland
 - Uses [xar](https://github.com/mackyle/xar)
+- Code signing via [rcodesign](https://github.com/indygreg/apple-platform-rs) by Gregory Szorc
 - Inspired by [GytPol's blog post](https://gytpol.com/blog/automating-mac-software-package-process-on-a-linux-based-os)
 
 ## Contributing
