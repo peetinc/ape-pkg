@@ -364,8 +364,8 @@ Additional tools and inspiration:
 
 ## Contributing
 
-Issues and pull requests welcome!
+Issues and pull requests welcome.
 
 ---
 
-**Happy packaging with APE!** 🦍📦
+🦍📦
